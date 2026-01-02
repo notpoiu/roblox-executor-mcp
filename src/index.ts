@@ -107,7 +107,7 @@ const NO_CLIENT_ERROR = {
   content: [
     {
       type: "text" as const,
-      text: "No Roblox client connected. Make sure the connector.luau script is running in your Roblox game.",
+      text: "No Roblox client connected to the MCP server. Please notify the user that they have to run the connector.luau script in order to connect the MCP server to their game.",
     },
   ],
 };
