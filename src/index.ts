@@ -19,7 +19,8 @@ function killProcessOnPort(port: number) {
   } catch {}
 }
 
-killProcessOnPort(WS_PORT);
+// Commented out cuz its only for local testing
+// killProcessOnPort(WS_PORT);
 
 // MCP Server
 const server = new McpServer({
