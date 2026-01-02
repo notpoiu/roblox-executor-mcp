@@ -5,6 +5,7 @@ local BridgeURL = getgenv().BridgeURL or ... or "localhost:16384"
 local LuaEncode = loadstring(game:HttpGet("https://raw.githubusercontent.com/chadhyatt/LuaEncode/refs/heads/master/src/LuaEncode.lua"))()
 local cloneref = cloneref or function(x) return x end
 local decompile = decompile or function(x) return "-- Unable to get script content." end
+local getnilinstances = getnilinstances or function() return {} end
 
 --// Services \\--
 local RobloxReplicatedStorage = cloneref(game:GetService("RobloxReplicatedStorage"))
@@ -235,6 +236,65 @@ local function CreateBridge()
     return HTTPBridge.new()
 end
 
+--// Script Source Mapping \\--
+local ScriptSourcesMap = {
+    HasFinishedMapping = false
+}
+
+local SourcesToMap, MappedSources = 0, 0
+
+local function MapScriptSource(script)
+    if ScriptSourcesMap[script:GetDebugId()] then return end
+
+    local success, decompOutput = pcall(decompile, script)
+    if not success then return end
+
+    ScriptSourcesMap[script:GetDebugId()] = decompOutput
+end
+
+local function GetScriptByDebugId(debugId)
+    for _, script in game:QueryDescendants("LuaSourceContainer") do
+        if script:IsA("Script") and script.RunContext == Enum.RunContext.Server then continue end
+        if script:GetDebugId() ~= debugId then continue end
+        
+        return script
+    end
+
+    for _, script in getnilinstances() do
+        if script:IsA("LuaSourceContainer") and not script:IsA("Script") and script.RunContext == Enum.RunContext.Client then
+            if script:GetDebugId() ~= debugId then continue end
+            
+            return script
+        end
+    end
+
+    return nil
+end
+
+do
+    game.DescendantAdded:Connect(function(script)
+        if not script:IsA("LuaSourceContainer") or not script:IsA("Script") or script.RunContext ~= Enum.RunContext.Client then return end
+
+        MapScriptSource(script)
+    end)
+
+    local scripts = game:QueryDescendants("LuaSourceContainer")
+    SourcesToMap = #scripts
+
+    --// Map script sources \\--
+    for idx, script in scripts do
+        if script:IsA("Script") and script.RunContext == Enum.RunContext.Server then continue end
+        if ScriptSourcesMap[script:GetDebugId()] then continue end
+
+        MapScriptSource(script)
+
+        MappedSources = idx
+        if idx % 250 == 0 then task.wait() end
+    end
+
+    ScriptSourcesMap.HasFinishedMapping = true
+end
+
 --// Main Loop \\--
 while true do
     local Bridge = CreateBridge()
@@ -245,7 +305,25 @@ while true do
     end)
 
     Bridge:BindToType("get-console-output", function(data)
-        return LogService:GetLogHistory()
+        local limit = data.limit or 50
+        local logsOrder = data.logsOrder or "NewestFirst"
+
+        local logs = LogService:GetLogHistory()
+        local results = {}
+        
+        if logsOrder == "NewestFirst" then
+            for i = #logs, 1, -1 do
+                if #results >= limit then break end
+                table.insert(results, logs[i])
+            end
+        else
+            for _, log in logs do
+                if #results >= limit then break end
+                table.insert(results, log)
+            end
+        end
+
+        return { count = #LogService:GetLogHistory(), limited = #LogService:GetLogHistory() > limit, results = results }
     end)
 
     Bridge:BindToType("get-data-by-code", function(data)
@@ -263,7 +341,11 @@ while true do
         assert(scriptInstance:IsA("LuaSourceContainer"), "Script instance is not a LuaSourceContainer (Script, LocalScript, or ModuleScript).")
         assert(not (scriptInstance:IsA("Script") and scriptInstance.RunContext == Enum.RunContext.Server), "Script instance is a Server Script.")
 
-        return decompile(scriptInstance)
+        if not ScriptSourcesMap[scriptInstance:GetDebugId()] then
+            MapScriptSource(scriptInstance)
+        end
+
+        return ScriptSourcesMap[scriptInstance:GetDebugId()]
     end)
 
     Bridge:BindToType("search-instances", function(data)
@@ -273,12 +355,14 @@ while true do
         local limit = data.limit or 50
         local results = {}
         
-        for i, instance in ipairs(instances) do
+        for i, instance in instances do
             if i > limit then break end
+
             table.insert(results, {
                 Name = instance.Name,
                 ClassName = instance.ClassName,
-                FullPath = instance:GetFullName()
+                InstancePath = instance,
+                DebugId = instance:GetDebugId()
             })
         end
         
@@ -304,6 +388,32 @@ while true do
             JobId = game.JobId,
             ServerType = RobloxReplicatedStorage.GetServerType:InvokeServer()
         }
+    end)
+
+    Bridge:BindToType("search-scripts-sources", function(data)
+        assert(ScriptSourcesMap.HasFinishedMapping, "The bridge is still mapping all script sources (" .. MappedSources .. "/" .. SourcesToMap .. ") please try again later.")
+        
+        local results = {}
+        local limit = data.limit or 50
+
+        local count = 0
+        for debugId, source in ScriptSourcesMap do
+            --// Rate limit \\--
+            count += 1
+            if count % 250 == 0 then task.wait() end
+
+            --// Filter \\--
+            if not source:find(data.query) then continue end
+            if #results >= limit then break end
+
+            --// Add to results \\--
+            table.insert(results, {
+                Script = GetScriptByDebugId(debugId) or "<ScriptProxy: " .. debugId .. ">",
+                Source = ScriptSourcesMap[debugId]
+            })
+        end
+
+        return results
     end)
 
     Bridge:WaitForDisconnect()

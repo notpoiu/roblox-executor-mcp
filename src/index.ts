@@ -20,7 +20,7 @@ function killProcessOnPort(port: number) {
 }
 
 // Commented out cuz its only for local testing
-// killProcessOnPort(WS_PORT);
+killProcessOnPort(WS_PORT);
 
 // MCP Server
 const server = new McpServer({
@@ -357,9 +357,26 @@ server.registerTool(
   {
     title:
       "Get the roblox developer console output from the Roblox Game Client",
+    inputSchema: z.object({
+      limit: z
+        .number()
+        .describe(
+          "Maximum number of results to return (default: 50, to avoid overwhelming output)"
+        )
+        .optional()
+        .default(50),
+      logsOrder: z
+        .enum(["NewestFirst", "OldestFirst"])
+        .describe("The order of the logs to return (default: NewestFirst)")
+        .optional()
+        .default("NewestFirst"),
+    }),
   },
-  async () => {
-    const toolCallId = SendArbitraryDataToClient("get-console-output", {});
+  async ({ limit, logsOrder }) => {
+    const toolCallId = SendArbitraryDataToClient("get-console-output", {
+      limit,
+      logsOrder,
+    });
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;
@@ -454,6 +471,60 @@ COMBINING SELECTORS: Chain selectors for AND logic. Example: Part.Tagged[Anchore
     if (response === undefined || response.output === undefined) {
       return {
         content: [{ type: "text", text: "Failed to search instances." }],
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: response.output,
+        },
+      ],
+    };
+  }
+);
+
+server.registerTool(
+  "search-scripts-sources",
+  {
+    title: "Search across all scripts in the game",
+    description:
+      'Search across all scripts in the game by their source code. IMPORTANT: If a script instance has already been garbage collected, a "<ScriptProxy: DebugId>" string will be returned instead of the script instance path.',
+    inputSchema: z.object({
+      query: z
+        .string()
+        .describe(
+          "The string to search, compatible with Luau string.find() pattern matching."
+        ),
+      limit: z
+        .number()
+        .describe(
+          "Maximum number of results to return (default: 50, to avoid overwhelming output)"
+        )
+        .optional()
+        .default(50),
+    }),
+  },
+  async ({ query, limit }) => {
+    const toolCallId = SendArbitraryDataToClient("search-scripts-sources", {
+      query,
+      limit,
+    });
+
+    if (toolCallId === null) {
+      return NO_CLIENT_ERROR;
+    }
+
+    const response = (await GetResponseOfIdFromClient(toolCallId)) as
+      | {
+          output: string;
+        }
+      | undefined;
+
+    if (response === undefined || response.output === undefined) {
+      return {
+        content: [{ type: "text", text: "Failed to search scripts." }],
       };
     }
 
