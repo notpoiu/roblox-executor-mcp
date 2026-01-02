@@ -395,25 +395,54 @@ while true do
         
         local results = {}
         local limit = data.limit or 50
+        local totalMatches = 0
 
         local count = 0
         for debugId, source in ScriptSourcesMap do
+            if debugId == "HasFinishedMapping" then continue end
+            
             --// Rate limit \\--
             count += 1
             if count % 250 == 0 then task.wait() end
 
-            --// Filter \\--
-            if not source:find(data.query) then continue end
+            --// Find all matching lines \\--
+            local matchingLines = {}
+            local lineNumber = 0
+            
+            for line in source:gmatch("[^\r\n]+") do
+                lineNumber += 1
+                
+                if line:find(data.query) then
+                    table.insert(matchingLines, {
+                        lineNumber = lineNumber,
+                        content = line
+                    })
+                end
+            end
+
+            --// Skip if no matches \\--
+            if #matchingLines == 0 then continue end
             if #results >= limit then break end
 
+            --// Get script reference \\--
+            local scriptRef = GetScriptByDebugId(debugId)
+            local scriptPath = scriptRef and scriptRef:GetFullName() or "<ScriptProxy: " .. debugId .. ">"
+
             --// Add to results \\--
+            totalMatches += #matchingLines
             table.insert(results, {
-                Script = GetScriptByDebugId(debugId) or "<ScriptProxy: " .. debugId .. ">",
-                Source = ScriptSourcesMap[debugId]
+                Script = scriptPath,
+                MatchCount = #matchingLines,
+                Matches = matchingLines
             })
         end
 
-        return results
+        return {
+            count = #results,
+            totalMatches = totalMatches,
+            limited = #results >= limit,
+            results = results
+        }
     end)
 
     Bridge:WaitForDisconnect()
