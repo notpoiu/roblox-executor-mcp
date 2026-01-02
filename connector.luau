@@ -426,7 +426,7 @@ while true do
 
             --// Get script reference \\--
             local scriptRef = GetScriptByDebugId(debugId)
-            local scriptPath = scriptRef and scriptRef:GetFullName() or "<ScriptProxy: " .. debugId .. ">"
+            local scriptPath = scriptRef and scriptRef or "<ScriptProxy: " .. debugId .. ">"
 
             --// Add to results \\--
             totalMatches += #matchingLines
