@@ -1,0 +1,11 @@
+# Build artifacts
+dist/*
+
+# node modules
+node_modules/*
+
+# Cursor
+.cursor/*
+
+# Cursor
+.cursor/*
