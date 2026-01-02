@@ -47,7 +47,7 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
       const cmd = pendingHttpCommand;
       pendingHttpCommand = null;
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify(cmd));
+      res.end(cmd);
     } else {
       res.writeHead(204);
       res.end();
