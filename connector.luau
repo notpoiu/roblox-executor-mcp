@@ -187,7 +187,7 @@ local HTTPBridge = setmetatable({}, {__index = BaseBridge}); do
             local consecutiveFailures = 0
             
             while self.Connected do
-                local success, err = pcall(function()
+                local success, _ = pcall(function()
                     local response = request({
                         Url = "http://" .. BridgeURL .. "/poll",
                         Method = "GET"
@@ -266,10 +266,12 @@ local ScriptSourcesMap = {
     HasFinishedMapping = false
 }
 
+local ScriptInstanceMap = setmetatable({}, { __mode = "v" })
 local SourcesToMap, MappedSources = 0, 0
 
 local function MapScriptSource(script)
-    if ScriptSourcesMap[script:GetDebugId()] then return end
+    local debugId = script:GetDebugId()
+    if ScriptSourcesMap[debugId] then return end
 
     for attempt = 1, 10 do
         local success, decompOutput = pcall(decompile, script)
@@ -278,17 +280,28 @@ local function MapScriptSource(script)
             continue
         end
     
-        ScriptSourcesMap[script:GetDebugId()] = decompOutput
+        ScriptSourcesMap[debugId] = decompOutput
         MappedSources += 1
         break
     end
+
+    ScriptInstanceMap[debugId] = script
+    script.Destroying:Once(function()
+        ScriptInstanceMap[debugId] = nil
+    end)
 end
 
 local function GetScriptByDebugId(debugId)
+    local CachedInstance = ScriptInstanceMap[debugId]
+    if CachedInstance then
+        return CachedInstance
+    end
+
     for _, script in game:QueryDescendants("LuaSourceContainer") do
         if script:IsA("Script") and script.RunContext == Enum.RunContext.Server then continue end
         if script:GetDebugId() ~= debugId then continue end
         
+        ScriptInstanceMap[debugId] = script
         return script
     end
 
@@ -296,6 +309,7 @@ local function GetScriptByDebugId(debugId)
         if script:IsA("LuaSourceContainer") and not script:IsA("Script") and script.RunContext == Enum.RunContext.Client then
             if script:GetDebugId() ~= debugId then continue end
             
+            ScriptInstanceMap[debugId] = script
             return script
         end
     end
@@ -554,111 +568,155 @@ while true do
         assert(ScriptSourcesMap.HasFinishedMapping, "The bridge is still mapping all script sources (" .. tostring(MappedSources) .. "/" .. tostring(SourcesToMap) .. ") please try again later.")
 
         local stringMatchQueries = ParseQuery(data.query)
-        local results = {}
         local limit = data.limit or 50
         local contextLines = data.contextLines or 2
         local totalMatches = 0
+        local maxMatchesPerScript = data.maxMatchesPerScript or 20
 
-        local function addMatch(matchingLines, lines, startLine, endLine, matchedContent)
-            local before = {}
-            for i = math.max(1, startLine - contextLines), startLine - 1 do
-                table.insert(before, { lineNumber = i, content = lines[i] })
+        --// Pre-compute query info \\--
+        local queryInfo = {}
+        for idx, query in stringMatchQueries do
+            local isLogicalAND = typeof(query) == "table"
+            local isMultiLine = false
+            
+            if isLogicalAND then
+                for _, q in query.AndQueries do
+                    if not q:find("\n", 1, true) then continue end
+                    
+                    isMultiLine = true
+                    break
+                end
+            else
+                isMultiLine = query:find("\n", 1, true) ~= nil
             end
             
-            local after = {}
-            for i = endLine + 1, math.min(#lines, endLine + contextLines) do
-                table.insert(after, { lineNumber = i, content = lines[i] })
-            end
-            
-            local content = {}
-            for i = startLine, endLine do
-                table.insert(content, { lineNumber = i, content = lines[i] })
-            end
-            
-            table.insert(matchingLines, {
-                lineNumber = startLine,
-                endLineNumber = endLine,
-                content = matchedContent or (startLine == endLine and lines[startLine] or content),
-                before = before,
-                after = after
-            })
+            queryInfo[idx] = { isLogicalAND = isLogicalAND, isMultiLine = isMultiLine }
         end
 
+        --// Filter scripts that we need to process (search) \\--
+        local matchingScripts = {}
         local count = 0
+        
         for debugId, source in ScriptSourcesMap do
             if debugId == "HasFinishedMapping" then continue end
-            if #results >= limit then break end
+            if #matchingScripts >= limit then break end
 
             --// Rate limit \\--
             count += 1
-            if count % 100 == 0 then task.wait() end
+            if count % 200 == 0 then task.wait() end
 
-            --// Pre-check, avoid line splitting if no query matches at all \\--
+            --// Pre-check \\--
             local hasAnyPotentialMatch = false
-            for _, query in stringMatchQueries do
-                local isQueryLogicalAND = typeof(query) == "table"
+            for idx, query in stringMatchQueries do
+                local info = queryInfo[idx]
                 
-                if isQueryLogicalAND then
+                if info.isLogicalAND then
                     local allPartsMatch = true
                     for _, andQuery in query.AndQueries do
-                        if not source:find(andQuery) then
+                        if not source:find(andQuery, 1, true) then
                             allPartsMatch = false
                             break
                         end
                     end
-
                     if allPartsMatch then
                         hasAnyPotentialMatch = true
                         break
                     end
-                elseif source:find(query) then
+                elseif source:find(query, 1, true) then
                     hasAnyPotentialMatch = true
                     break
                 end
             end
 
             if not hasAnyPotentialMatch then continue end
-
-            --// Split source into lines only if we found a potential match \\--
-            local lines = {}
-            for line in source:gmatch("[^\r\n]*") do
-                table.insert(lines, line)
-            end
-            local lineStarts = GetLineInfo(source)
-
-            --// Find all matching lines with context \\--
-            local matchingLines = {}
-            local matchedPositions = {}
             
-            for _, query in stringMatchQueries do
-                local isMultiLine = false
-                local isLogicalAND = typeof(query) == "table"
-                
-                if isLogicalAND then
-                    for _, q in query.AndQueries do
-                        if not q:find("\n") then
-                            continue
-                        end
+            table.insert(matchingScripts, { debugId = debugId, source = source })
+        end
 
-                        isMultiLine = true
+        --// Process matching scripts \\--
+        local results = {}
+        
+        for _, scriptData in matchingScripts do
+            if #results >= limit then break end
+            
+            local debugId = scriptData.debugId
+            local source = scriptData.source
+            
+            --// Build line info lazily \\--
+            local lines = nil
+            local lineStarts = nil
+            
+            local function EnsureLineInfo()
+                if lines then return end
+                lines = {}
+                local pos = 1
+                local len = #source
+                while pos <= len do
+                    local newlinePos = source:find("\n", pos, true)
+                    if newlinePos then
+                        table.insert(lines, source:sub(pos, newlinePos - 1))
+                        pos = newlinePos + 1
+                    else
+                        table.insert(lines, source:sub(pos))
                         break
                     end
+                end
+                lineStarts = GetLineInfo(source)
+            end
+
+            local function AddMatch(matchingLines, startLine, endLine, matchedContent)
+                EnsureLineInfo()
+                
+                local before = {}
+                for i = math.max(1, startLine - contextLines), startLine - 1 do
+                    table.insert(before, { lineNumber = i, content = lines[i] or "" })
+                end
+                
+                local after = {}
+                for i = endLine + 1, math.min(#lines, endLine + contextLines) do
+                    table.insert(after, { lineNumber = i, content = lines[i] or "" })
+                end
+                
+                local content
+                if startLine == endLine then
+                    content = matchedContent or lines[startLine] or ""
                 else
-                    if query:find("\n") then
-                        isMultiLine = true
+                    content = {}
+                    for i = startLine, endLine do
+                        table.insert(content, { lineNumber = i, content = lines[i] or "" })
                     end
                 end
                 
-                if isMultiLine then
+                table.insert(matchingLines, {
+                    lineNumber = startLine,
+                    endLineNumber = endLine,
+                    content = content,
+                    before = before,
+                    after = after
+                })
+            end
+
+            --// Find all matching lines \\--
+            local matchingLines = {}
+            local matchedPositions = {}
+            
+            for idx, query in stringMatchQueries do
+                if #matchingLines >= maxMatchesPerScript then break end
+                
+                local info = queryInfo[idx]
+                
+                if info.isMultiLine then
+                    EnsureLineInfo()
+
                     local searchStart = 1
-                    while true do
+                    while #matchingLines < maxMatchesPerScript do
                         local matchStart, matchEnd
                         
-                        if isLogicalAND then
+                        if info.isLogicalAND then
                             local allMatch = true
                             local minStart, maxEnd = math.huge, 0
                             for _, andQuery in query.AndQueries do
-                                local s, e = source:find(andQuery, searchStart)
+                                local s, e = source:find(andQuery, searchStart, true)
                                 if not s then
                                     allMatch = false
                                     break
@@ -667,52 +725,77 @@ while true do
                                 minStart = math.min(minStart, s)
                                 maxEnd = math.max(maxEnd, e)
                             end
+
                             if allMatch then matchStart, matchEnd = minStart, maxEnd end
                         else
-                            matchStart, matchEnd = source:find(query, searchStart)
+                            matchStart, matchEnd = source:find(query, searchStart, true)
                         end
                         
                         if not matchStart then break end
                         
-                        local posKey = matchStart .. "-" .. matchEnd
+                        local posKey = matchStart
                         if not matchedPositions[posKey] then
                             matchedPositions[posKey] = true
                             local startLine = GetLineNumber(lineStarts, matchStart)
                             local endLine = GetLineNumber(lineStarts, matchEnd)
                             local matchedContent = source:sub(matchStart, matchEnd)
-                            addMatch(matchingLines, lines, startLine, endLine, matchedContent)
+                            AddMatch(matchingLines, startLine, endLine, matchedContent)
                         end
 
                         searchStart = matchEnd + 1
                     end
-                else
-                    for lineNumber, line in lines do
-                        local isMatch = false
 
-                        if isLogicalAND then
-                            local hasFulfilled = true
+                else
+                    
+                    local searchStart = 1
+                    while #matchingLines < maxMatchesPerScript do
+                        local matchStart, matchEnd
+                        
+                        if info.isLogicalAND then
+                            -- For AND queries, find first query then verify others on same line
+                            local firstQuery = query.AndQueries[1]
+                            matchStart, matchEnd = source:find(firstQuery, searchStart, true)
                             
-                            for _, andQuery in query.AndQueries do
-                                if line:find(andQuery) then
+                            if matchStart then
+                                -- Find line boundaries
+                                local lineStart = source:sub(1, matchStart):match(".*\n()") or 1
+                                local lineEnd = source:find("\n", matchEnd, true) or (#source + 1)
+                                local lineContent = source:sub(lineStart, lineEnd - 1)
+                                
+                                -- Check all AND queries match on this line
+                                local allMatch = true
+                                for i = 2, #query.AndQueries do
+                                    if not lineContent:find(query.AndQueries[i], 1, true) then
+                                        allMatch = false
+                                        break
+                                    end
+                                end
+                                
+                                if not allMatch then
+                                    searchStart = lineEnd + 1
                                     continue
                                 end
                                 
-                                hasFulfilled = false
-                                break
+                                matchStart = lineStart
+                                matchEnd = lineEnd - 1
                             end
-
-                            isMatch = hasFulfilled
                         else
-                            isMatch = line:find(query) ~= nil
+                            matchStart, matchEnd = source:find(query, searchStart, true)
                         end
-
-                        if isMatch then
-                            local posKey = lineNumber .. "-" .. lineNumber
-                            if not matchedPositions[posKey] then
-                                matchedPositions[posKey] = true
-                                addMatch(matchingLines, lines, lineNumber, lineNumber, line)
-                            end
+                        
+                        if not matchStart then break end
+                        
+                        EnsureLineInfo()
+                        local lineNumber = GetLineNumber(lineStarts, matchStart)
+                        
+                        if not matchedPositions[lineNumber] then
+                            matchedPositions[lineNumber] = true
+                            AddMatch(matchingLines, lineNumber, lineNumber, lines[lineNumber])
                         end
+                        
+                        local nextNewline = source:find("\n", matchEnd, true)
+                        if not nextNewline then break end
+                        searchStart = nextNewline + 1
                     end
                 end
             end
@@ -740,3 +823,4 @@ while true do
 
     Bridge:WaitForDisconnect()
 end
+
