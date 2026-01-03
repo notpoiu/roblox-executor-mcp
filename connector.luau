@@ -45,12 +45,8 @@ local BaseBridge = {}; do
     function BaseBridge:FormatResponse(message, id, isError)
         if isError then
             return {
-                output = LuaEncode({
-                    success = false,
-                    error = message
-                }, {
-                    Prettify = true
-                }),
+                error = tostring(message),
+                success = false,
                 id = id
             }
         end
