@@ -495,7 +495,7 @@ server.registerTool(
       query: z
         .string()
         .describe(
-          "The string to search, compatible with Luau string.find() pattern matching."
+          "The string to search, compatible with Luau string.find() pattern matching. IMPORTANT: using | in the query will be treated as a logical OR, use & for logical AND, and use \\\\ for escaping (e.g., \\\\|)."
         ),
       limit: z
         .number()

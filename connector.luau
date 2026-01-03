@@ -1,3 +1,8 @@
+--// Wait for game to load \\--
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
 --// Variables \\--
 local BridgeURL = getgenv().BridgeURL or ... or "localhost:16384"
 
@@ -10,6 +15,8 @@ local getnilinstances = getnilinstances or function() return {} end
 --// Services \\--
 local RobloxReplicatedStorage = cloneref(game:GetService("RobloxReplicatedStorage"))
 local MarketplaceService = cloneref(game:GetService("MarketplaceService"))
+local CoreGui = cloneref(game:GetService("CoreGui"))
+local CorePackages = cloneref(game:GetService("CorePackages"))
 local HttpService = cloneref(game:GetService("HttpService"))
 local LogService = cloneref(game:GetService("LogService"))
 
@@ -242,10 +249,16 @@ local SourcesToMap, MappedSources = 0, 0
 local function MapScriptSource(script)
     if ScriptSourcesMap[script:GetDebugId()] then return end
 
-    local success, decompOutput = pcall(decompile, script)
-    if not success then return end
-
-    ScriptSourcesMap[script:GetDebugId()] = decompOutput
+    for attempt = 1, 10 do
+        local success, decompOutput = pcall(decompile, script)
+        if not success then
+            task.wait(0.5)
+            continue
+        end
+    
+        ScriptSourcesMap[script:GetDebugId()] = decompOutput
+        break
+    end
 end
 
 local function GetScriptByDebugId(debugId)
@@ -268,9 +281,25 @@ local function GetScriptByDebugId(debugId)
 end
 
 do
-    game.DescendantAdded:Connect(function(script)
-        if not script:IsA("LuaSourceContainer") or not script:IsA("Script") or script.RunContext ~= Enum.RunContext.Client then return end
+    local function ShouldMapScript(script)        
+        local IsServerScript = script:IsA("Script") and script.RunContext == Enum.RunContext.Server
+        if IsServerScript then return false end
 
+        local IsRobloxScript = script.RobloxLocked or script:IsDescendantOf(CoreGui) or script:IsDescendantOf(CorePackages)
+        if IsRobloxScript then return false end
+
+        local IsAlreadyMapped = ScriptSourcesMap[script:GetDebugId()]
+        if IsAlreadyMapped then return false end
+
+        return true
+    end
+
+    game.DescendantAdded:Connect(function(script)
+        if not script:IsA("LuaSourceContainer") then
+            return
+        end
+
+        if not ShouldMapScript(script) then return end
         MapScriptSource(script)
     end)
 
@@ -278,18 +307,74 @@ do
     SourcesToMap = #scripts
 
     --// Map script sources \\--
-    for idx, script in scripts do
-        if script:IsA("Script") and script.RunContext == Enum.RunContext.Server then continue end
-        if ScriptSourcesMap[script:GetDebugId()] then continue end
+    for idx, scriptObject in scripts do
+        if not ShouldMapScript(scriptObject) then continue end
+        task.defer(MapScriptSource, scriptObject)
 
-        MapScriptSource(script)
-
-        MappedSources = idx
-        if idx % 250 == 0 then task.wait() end
+        if idx % 250 == 0 then task.wait(0.5) end
     end
 
     ScriptSourcesMap.HasFinishedMapping = true
 end
+
+--// Parse Query \\--
+local function ParseQuery(query)
+    local stringMatchQueries = {}
+    do  
+        local queries = {}
+        local isEscaping = false
+        local currentQuery = ""
+        
+        for idx, query in query:split("|") do
+            local lastChar = string.sub(query, #query)
+
+            --// Handle escaping \\--
+            if lastChar == "\\" then
+                local escapedQuery = string.sub(query, 1, #query - 1)
+                if isEscaping then
+                    currentQuery ..= escapedQuery .. "|"
+                else
+                    isEscaping = true
+                    currentQuery = escapedQuery .. "|"
+                end
+                continue
+            elseif isEscaping then
+                isEscaping = false
+                currentQuery ..= query
+            else
+                currentQuery = query
+            end
+
+            --// Check for AND queries (split by &) \\--
+            if currentQuery:find("&") then
+                local andParts = currentQuery:split("&")
+                local andQueries = {}
+                
+                for _, part in andParts do
+                    if part ~= "" then
+                        table.insert(andQueries, part)
+                    end
+                end
+                
+                if #andQueries > 1 then
+                    table.insert(queries, { AndQueries = andQueries })
+                elseif #andQueries == 1 then
+                    table.insert(queries, andQueries[1])
+                end
+            else
+                table.insert(queries, currentQuery)
+            end
+        end
+
+        for _, query in queries do
+            if typeof(query) == "string" and query == "" then continue end
+            table.insert(stringMatchQueries, query)
+        end
+    end
+
+    return stringMatchQueries
+end
+
 
 --// Main Loop \\--
 while true do
@@ -388,7 +473,8 @@ while true do
 
     Bridge:BindToType("search-scripts-sources", function(data)
         assert(ScriptSourcesMap.HasFinishedMapping, "The bridge is still mapping all script sources (" .. tostring(MappedSources) .. "/" .. tostring(SourcesToMap) .. ") please try again later.")
-        
+
+        local stringMatchQueries = ParseQuery(data.query)
         local results = {}
         local limit = data.limit or 50
         local contextLines = data.contextLines or 2
@@ -411,26 +497,46 @@ while true do
             --// Find all matching lines with context \\--
             local matchingLines = {}
             
-            for lineNumber, line in ipairs(lines) do
-                if line:find(data.query) then
-                    --// Get context before \\--
-                    local before = {}
-                    for i = math.max(1, lineNumber - contextLines), lineNumber - 1 do
-                        table.insert(before, { lineNumber = i, content = lines[i] })
+            for lineNumber, line in lines do
+                for _, query in stringMatchQueries do
+
+                    local isMatch = false
+
+                    --// Handle Logical AND \\--
+                    if typeof(query) == "table" then
+                        local hasFulfilled = true
+                        for _, andQuery in query.AndQueries do
+                            if not line:find(andQuery) then
+                                hasFulfilled = false
+                                break
+                            end
+                        end
+                        isMatch = hasFulfilled
+                    else
+                        --// Handle Logical OR \\--
+                        isMatch = line:find(query) ~= nil
                     end
-                    
-                    --// Get context after \\--
-                    local after = {}
-                    for i = lineNumber + 1, math.min(#lines, lineNumber + contextLines) do
-                        table.insert(after, { lineNumber = i, content = lines[i] })
+
+                    if isMatch then
+                        --// Get context before \\--
+                        local before = {}
+                        for i = math.max(1, lineNumber - contextLines), lineNumber - 1 do
+                            table.insert(before, { lineNumber = i, content = lines[i] })
+                        end
+                        
+                        --// Get context after \\--
+                        local after = {}
+                        for i = lineNumber + 1, math.min(#lines, lineNumber + contextLines) do
+                            table.insert(after, { lineNumber = i, content = lines[i] })
+                        end
+                        
+                        table.insert(matchingLines, {
+                            lineNumber = lineNumber,
+                            content = line,
+                            before = before,
+                            after = after
+                        })
                     end
-                    
-                    table.insert(matchingLines, {
-                        lineNumber = lineNumber,
-                        content = line,
-                        before = before,
-                        after = after
-                    })
                 end
             end
 
