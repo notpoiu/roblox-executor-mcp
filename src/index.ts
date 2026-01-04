@@ -336,7 +336,14 @@ server.registerTool(
 
     if (response === undefined || response.output === undefined) {
       return {
-        content: [{ type: "text", text: "Failed to get data by code." }],
+        content: [
+          {
+            type: "text",
+            text:
+              "Failed to get data by code. Response: " +
+              JSON.stringify(response),
+          },
+        ],
       };
     }
 
