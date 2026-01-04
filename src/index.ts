@@ -6,8 +6,245 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { execSync } from "child_process";
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { z } from "zod";
+import crypto from "crypto";
 
 const WS_PORT = 16384;
+const HTTP_POLL_TIMEOUT = 10000; // 10 seconds
+
+const STATUS_PAGE_HTML = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Roblox MCP Status</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #0a0a0c;
+            --card: rgba(20, 20, 25, 0.7);
+            --border: rgba(255, 255, 255, 0.1);
+            --primary: #5865F2;
+            --success: #10b981;
+            --error: #ef4444;
+            --text: #ffffff;
+            --text-dim: #94a3b8;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background: var(--bg);
+            background-image: 
+                radial-gradient(at 0% 0%, rgba(88, 101, 242, 0.15) 0px, transparent 50%),
+                radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.1) 0px, transparent 50%);
+            color: var(--text);
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 480px;
+            padding: 2rem;
+            position: relative;
+        }
+
+        .card {
+            background: var(--card);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--border);
+            border-radius: 24px;
+            padding: 3rem 2rem;
+            text-align: center;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            animation: slideUp 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .status-blob {
+            width: 120px;
+            height: 120px;
+            margin: 0 auto 2rem;
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .status-icon {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 2.5rem;
+            z-index: 2;
+            transition: all 0.5s ease;
+        }
+
+        .status-ring {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            border: 2px solid transparent;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(0.8); opacity: 1; }
+            100% { transform: scale(1.3); opacity: 0; }
+        }
+
+        /* Connected State */
+        .connected .status-icon {
+            background: rgba(16, 185, 129, 0.2);
+            color: var(--success);
+            box-shadow: 0 0 30px rgba(16, 185, 129, 0.2);
+        }
+        .connected .status-ring { border-color: var(--success); }
+
+        /* Disconnected State */
+        .disconnected .status-icon {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--error);
+            box-shadow: 0 0 30px rgba(239, 68, 68, 0.2);
+        }
+        .disconnected .status-ring { border-color: var(--error); }
+
+        h1 {
+            font-size: 2rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            letter-spacing: -0.02em;
+        }
+
+        .subtext {
+            color: var(--text-dim);
+            font-size: 1.1rem;
+            margin-bottom: 2.5rem;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1rem;
+            border-top: 1px solid var(--border);
+            padding-top: 2rem;
+        }
+
+        .stat-item {
+            text-align: left;
+            padding: 0.5rem;
+        }
+
+        .stat-label {
+            color: var(--text-dim);
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            margin-bottom: 0.25rem;
+        }
+
+        .stat-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1rem;
+            color: var(--primary);
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 99px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            background: var(--primary);
+            color: white;
+            margin-bottom: 1.5rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container" id="app">
+        <div class="card disconnected" id="statusCard">
+            <div class="badge">Roblox MCP Server</div>
+            <div class="status-blob">
+                <div class="status-ring"></div>
+                <div class="status-icon">
+                    <span id="statusEmoji">×</span>
+                </div>
+            </div>
+            <h1 id="statusText">Disconnected</h1>
+            <p class="subtext" id="subText">Waiting for Roblox client...</p>
+            
+            <div class="stats">
+                <div class="stat-item">
+                    <div class="stat-label">Connection</div>
+                    <div class="stat-value" id="methodValue">None</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Clients</div>
+                    <div class="stat-value" id="clientCount">0</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const statusCard = document.getElementById('statusCard');
+        const statusText = document.getElementById('statusText');
+        const subText = document.getElementById('subText');
+        const statusEmoji = document.getElementById('statusEmoji');
+        const methodValue = document.getElementById('methodValue');
+        const clientCountValue = document.getElementById('clientCount');
+
+        async function updateStatus() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+
+                if (data.connected) {
+                    statusCard.className = 'card connected';
+                    statusText.innerText = 'Connected';
+                    subText.innerText = '';
+                    statusEmoji.innerText = '✓';
+                } else {
+                    statusCard.className = 'card disconnected';
+                    statusText.innerText = 'Disconnected';
+                    statusEmoji.innerText = '×';
+                }
+
+                methodValue.innerText = data.method;
+                clientCountValue.innerText = data.clientCount;
+            } catch (e) {
+                statusCard.className = 'card disconnected';
+                statusText.innerText = 'Offline';
+                statusEmoji.innerText = '!';
+                methodValue.innerText = 'Error';
+            }
+        }
+
+        setInterval(updateStatus, 2000);
+        updateStatus();
+    </script>
+</body>
+</html>
+`;
 
 function killProcessOnPort(port: number) {
   try {
@@ -16,7 +253,7 @@ function killProcessOnPort(port: number) {
       console.error(`Killing existing process ${pid} on port ${port}...`);
       execSync(`kill -9 ${pid}`);
     }
-  } catch {}
+  } catch { }
 }
 
 // Commented out cuz its only for local testing
@@ -31,7 +268,7 @@ const server = new McpServer({
 });
 
 // HTTP polling state
-let httpClientConnected = false;
+let lastHttpPollTime = 0;
 let pendingHttpCommand: any = null;
 let httpResponseResolvers: Map<string, (data: any) => void> = new Map();
 
@@ -39,9 +276,30 @@ let httpResponseResolvers: Map<string, (data: any) => void> = new Map();
 const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
   const url = new URL(req.url || "/", `http://localhost:${WS_PORT}`);
 
+  // Root status page
+  if (url.pathname === "/" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end(STATUS_PAGE_HTML);
+    return;
+  }
+
+  // API Status for dashboard polling
+  if (url.pathname === "/api/status" && req.method === "GET") {
+    const wsClients = Array.from(wss.clients).filter(c => c.readyState === WebSocket.OPEN).length;
+    const isHttpConnected = Date.now() - lastHttpPollTime < HTTP_POLL_TIMEOUT;
+
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      connected: wsClients > 0 || isHttpConnected,
+      method: wsClients > 0 ? "WebSocket" : (isHttpConnected ? "HTTP" : "None"),
+      clientCount: wsClients + (isHttpConnected ? 1 : 0)
+    }));
+    return;
+  }
+
   // HTTP polling - return pending command if any
   if (url.pathname === "/poll" && req.method === "GET") {
-    httpClientConnected = true;
+    lastHttpPollTime = Date.now();
 
     if (pendingHttpCommand) {
       const cmd = pendingHttpCommand;
@@ -99,8 +357,8 @@ function hasConnectedClients(): boolean {
     }
   }
 
-  // HTTP polling client
-  return httpClientConnected;
+  // HTTP polling client (with timeout check)
+  return Date.now() - lastHttpPollTime < HTTP_POLL_TIMEOUT;
 }
 
 const NO_CLIENT_ERROR = {
@@ -200,7 +458,7 @@ server.registerTool(
     console.error(`Executing code in thread ${threadContext}...`);
 
     const result = SendArbitraryDataToClient("execute", {
-      source: `setthreadidentity(${threadContext})\n${code}`,
+      source: `setthreadidentity(${threadContext})\\n${code}`,
     });
 
     if (result === null) {
@@ -272,8 +530,8 @@ server.registerTool(
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
       | {
-          output: string;
-        }
+        output: string;
+      }
       | undefined;
 
     if (response === undefined || response.output === undefined) {
@@ -330,8 +588,8 @@ server.registerTool(
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
       | {
-          output: string;
-        }
+        output: string;
+      }
       | undefined;
 
     if (response === undefined || response.output === undefined) {
@@ -391,8 +649,8 @@ server.registerTool(
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
       | {
-          output: string;
-        }
+        output: string;
+      }
       | undefined;
 
     if (response === undefined || response.output === undefined) {
@@ -471,20 +729,13 @@ COMBINING SELECTORS: Chain selectors for AND logic. Example: Part.Tagged[Anchore
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
       | {
-          output: string;
-        }
+        output: string;
+      }
       | undefined;
 
     if (response === undefined || response.output === undefined) {
       return {
-        content: [
-          {
-            type: "text",
-            text:
-              "Failed to search instances. Response: " +
-              JSON.stringify(response),
-          },
-        ],
+        content: [{ type: "text", text: "Failed to search instances." }],
       };
     }
 
@@ -509,7 +760,7 @@ server.registerTool(
       query: z
         .string()
         .describe(
-          "The string to search, compatible with Luau string.find() pattern matching. IMPORTANT: using | in the query will be treated as a logical OR, use & for logical AND, and use \\\\ for escaping (e.g., \\\\|)."
+          "The string to search, compatible with Luau string.find() pattern matching. IMPORTANT: using | in the query will be treated as a logical OR, use & for logical AND, and use \\\\\\\\ for escaping (e.g., \\\\\\\\|)."
         ),
       limit: z
         .number()
@@ -546,8 +797,8 @@ server.registerTool(
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
       | {
-          output: string;
-        }
+        output: string;
+      }
       | undefined;
 
     if (response === undefined || response.output === undefined) {
@@ -591,8 +842,8 @@ server.registerTool(
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
       | {
-          output: string;
-        }
+        output: string;
+      }
       | undefined;
 
     if (response === undefined || response.output === undefined) {
