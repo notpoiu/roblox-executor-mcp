@@ -253,7 +253,7 @@ function killProcessOnPort(port: number) {
       console.error(`Killing existing process ${pid} on port ${port}...`);
       execSync(`kill -9 ${pid}`);
     }
-  } catch { }
+  } catch {}
 }
 
 // Commented out cuz its only for local testing
@@ -285,15 +285,19 @@ const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
 
   // API Status for dashboard polling
   if (url.pathname === "/api/status" && req.method === "GET") {
-    const wsClients = Array.from(wss.clients).filter(c => c.readyState === WebSocket.OPEN).length;
+    const wsClients = Array.from(wss.clients).filter(
+      (c) => c.readyState === WebSocket.OPEN
+    ).length;
     const isHttpConnected = Date.now() - lastHttpPollTime < HTTP_POLL_TIMEOUT;
 
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({
-      connected: wsClients > 0 || isHttpConnected,
-      method: wsClients > 0 ? "WebSocket" : (isHttpConnected ? "HTTP" : "None"),
-      clientCount: wsClients + (isHttpConnected ? 1 : 0)
-    }));
+    res.end(
+      JSON.stringify({
+        connected: wsClients > 0 || isHttpConnected,
+        method: wsClients > 0 ? "WebSocket" : isHttpConnected ? "HTTP" : "None",
+        clientCount: wsClients + (isHttpConnected ? 1 : 0),
+      })
+    );
     return;
   }
 
@@ -458,7 +462,7 @@ server.registerTool(
     console.error(`Executing code in thread ${threadContext}...`);
 
     const result = SendArbitraryDataToClient("execute", {
-      source: `setthreadidentity(${threadContext})\\n${code}`,
+      source: `setthreadidentity(${threadContext})\n${code}`,
     });
 
     if (result === null) {
@@ -530,8 +534,8 @@ server.registerTool(
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
       | {
-        output: string;
-      }
+          output: string;
+        }
       | undefined;
 
     if (response === undefined || response.output === undefined) {
@@ -588,8 +592,8 @@ server.registerTool(
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
       | {
-        output: string;
-      }
+          output: string;
+        }
       | undefined;
 
     if (response === undefined || response.output === undefined) {
@@ -649,8 +653,8 @@ server.registerTool(
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
       | {
-        output: string;
-      }
+          output: string;
+        }
       | undefined;
 
     if (response === undefined || response.output === undefined) {
@@ -729,13 +733,20 @@ COMBINING SELECTORS: Chain selectors for AND logic. Example: Part.Tagged[Anchore
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
       | {
-        output: string;
-      }
+          output: string;
+        }
       | undefined;
 
     if (response === undefined || response.output === undefined) {
       return {
-        content: [{ type: "text", text: "Failed to search instances." }],
+        content: [
+          {
+            type: "text",
+            text:
+              "Failed to search instances. Response: " +
+              JSON.stringify(response),
+          },
+        ],
       };
     }
 
@@ -797,8 +808,8 @@ server.registerTool(
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
       | {
-        output: string;
-      }
+          output: string;
+        }
       | undefined;
 
     if (response === undefined || response.output === undefined) {
@@ -842,8 +853,8 @@ server.registerTool(
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
       | {
-        output: string;
-      }
+          output: string;
+        }
       | undefined;
 
     if (response === undefined || response.output === undefined) {
