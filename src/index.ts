@@ -1112,6 +1112,82 @@ server.registerTool(
   }
 );
 
+server.registerTool(
+  "get-descendants-tree",
+  {
+    title: "Get the descendants tree of a Roblox instance",
+    description:
+      "Returns a structured hierarchy tree of an instance's descendants, showing names, class types, and nesting. Useful for exploring game structure without writing custom Lua. Results are depth-limited and optionally filtered by class.",
+    inputSchema: z.object({
+      root: z
+        .string()
+        .describe(
+          "The instance path to get the tree from (e.g., 'game.Workspace', 'game.Workspace.CurrentRooms')"
+        ),
+      maxDepth: z
+        .number()
+        .describe(
+          "Maximum depth to traverse (default: 3). Higher values return more detail but larger output."
+        )
+        .optional()
+        .default(3),
+      classFilter: z
+        .string()
+        .describe(
+          "Optional class name filter — only show instances that IsA this class (e.g., 'BasePart', 'Model'). Leave empty to show all."
+        )
+        .optional(),
+      maxChildren: z
+        .number()
+        .describe(
+          "Maximum number of children to show per node (default: 50). Prevents overwhelming output for large containers."
+        )
+        .optional()
+        .default(50),
+    }),
+  },
+  async ({ root, maxDepth, classFilter, maxChildren }) => {
+    const toolCallId = SendArbitraryDataToClient("get-descendants-tree", {
+      root,
+      maxDepth,
+      classFilter: classFilter || "",
+      maxChildren,
+    });
+
+    if (toolCallId === null) {
+      return NO_CLIENT_ERROR;
+    }
+
+    const response = (await GetResponseOfIdFromClient(toolCallId)) as
+      | {
+          output: string;
+        }
+      | undefined;
+
+    if (response === undefined || response.output === undefined) {
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              "Failed to get descendants tree. Response: " +
+              JSON.stringify(response),
+          },
+        ],
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: response.output,
+        },
+      ],
+    };
+  }
+);
+
 // ─── Start everything ───────────────────────────────────────────────────────────
 
 const transport = new StdioServerTransport();

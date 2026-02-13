@@ -564,6 +564,70 @@ while true do
         }
     end)
 
+    Bridge:BindToType("get-descendants-tree", function(data)
+        local rootInstance = loadstring("return " .. data.root)()
+        assert(typeof(rootInstance) == "Instance", "Root path did not resolve to a valid Instance.")
+
+        local maxDepth = data.maxDepth or 3
+        local maxChildren = data.maxChildren or 50
+        local classFilter = data.classFilter or ""
+        local hasFilter = classFilter ~= ""
+
+        local function buildTree(instance, depth)
+            if depth > maxDepth then
+                return nil
+            end
+
+            local children = instance:GetChildren()
+            local childNodes = {}
+            local shown = 0
+            local total = #children
+
+            for _, child in children do
+                if shown >= maxChildren then break end
+
+                if hasFilter and not child:IsA(classFilter) then
+                    -- Even if this child doesn't match, check if any descendant might
+                    -- Only skip if we're at max depth anyway
+                    if depth < maxDepth then
+                        local subtree = buildTree(child, depth + 1)
+                        if subtree and subtree.Children and #subtree.Children > 0 then
+                            table.insert(childNodes, subtree)
+                            shown += 1
+                        end
+                    end
+                    continue
+                end
+
+                local node = {
+                    Name = child.Name,
+                    ClassName = child.ClassName,
+                    ChildCount = #child:GetChildren()
+                }
+
+                if depth < maxDepth and node.ChildCount > 0 then
+                    local subtree = buildTree(child, depth + 1)
+                    if subtree then
+                        node.Children = subtree.Children
+                    end
+                end
+
+                table.insert(childNodes, node)
+                shown += 1
+            end
+
+            return {
+                Name = instance.Name,
+                ClassName = instance.ClassName,
+                ChildCount = total,
+                TruncatedAt = if shown < total then shown else nil,
+                Children = childNodes
+            }
+        end
+
+        return buildTree(rootInstance, 0)
+    end)
+
     Bridge:BindToType("search-scripts-sources", function(data)
         assert(ScriptSourcesMap.HasFinishedMapping, "The bridge is still mapping all script sources (" .. tostring(MappedSources) .. "/" .. tostring(SourcesToMap) .. ") please try again later.")
 
