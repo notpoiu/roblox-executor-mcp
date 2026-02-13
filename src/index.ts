@@ -10,7 +10,30 @@ import crypto from "crypto";
 
 const WS_PORT = 16384;
 const HTTP_POLL_TIMEOUT = 10000; // 10 seconds
+const PROMOTION_JITTER_MAX = 300; // ms
 
+// ─── Instance role ──────────────────────────────────────────────────────────────
+let instanceRole: "primary" | "secondary" = "primary";
+
+// ─── Primary-mode state ─────────────────────────────────────────────────────────
+let httpServer: ReturnType<typeof createServer> | null = null;
+let wss: WebSocketServer | null = null;
+
+// HTTP polling state (primary only)
+let lastHttpPollTime = 0;
+let pendingHttpCommand: any = null;
+let httpResponseResolvers: Map<string, (data: any) => void> = new Map();
+
+// Relay clients (secondaries connected to this primary)
+let relayClients: Set<WebSocket> = new Set();
+// Map request id → relay WebSocket that sent it, so responses route back
+let relayRequestOrigin: Map<string, WebSocket> = new Map();
+
+// ─── Secondary-mode state ───────────────────────────────────────────────────────
+let relaySocket: WebSocket | null = null;
+let secondaryResponseResolvers: Map<string, (data: any) => void> = new Map();
+
+// ─── Status page HTML ───────────────────────────────────────────────────────────
 const STATUS_PAGE_HTML = `
 <!DOCTYPE html>
 <html lang="en">
@@ -201,6 +224,14 @@ const STATUS_PAGE_HTML = `
                     <div class="stat-label">Clients</div>
                     <div class="stat-value" id="clientCount">0</div>
                 </div>
+                <div class="stat-item">
+                    <div class="stat-label">Role</div>
+                    <div class="stat-value" id="roleValue">—</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Relay Clients</div>
+                    <div class="stat-value" id="relayCount">0</div>
+                </div>
             </div>
         </div>
     </div>
@@ -212,6 +243,8 @@ const STATUS_PAGE_HTML = `
         const statusEmoji = document.getElementById('statusEmoji');
         const methodValue = document.getElementById('methodValue');
         const clientCountValue = document.getElementById('clientCount');
+        const roleValue = document.getElementById('roleValue');
+        const relayCountValue = document.getElementById('relayCount');
 
         async function updateStatus() {
             try {
@@ -231,6 +264,8 @@ const STATUS_PAGE_HTML = `
 
                 methodValue.innerText = data.method;
                 clientCountValue.innerText = data.clientCount;
+                roleValue.innerText = data.role;
+                relayCountValue.innerText = data.relayClients;
             } catch (e) {
                 statusCard.className = 'card disconnected';
                 statusText.innerText = 'Offline';
@@ -246,124 +281,13 @@ const STATUS_PAGE_HTML = `
 </html>
 `;
 
-function killProcessOnPort(port: number) {
-  try {
-    const pid = execSync(`lsof -ti :${port}`, { encoding: "utf-8" }).trim();
-    if (pid) {
-      console.error(`Killing existing process ${pid} on port ${port}...`);
-      execSync(`kill -9 ${pid}`);
-    }
-  } catch {}
-}
-
-// Commented out cuz its only for local testing
-// killProcessOnPort(WS_PORT);
-
-// MCP Server
+// ─── MCP Server (always created regardless of role) ─────────────────────────────
 const server = new McpServer({
   name: "RobloxMCP",
   version: "1.0.0",
   description:
     "A MCP Server allowing interaction to the Roblox Game Client (including access to restricted APIs such as getgc(), getreg(), etc.) with full control over the game.",
 });
-
-// HTTP polling state
-let lastHttpPollTime = 0;
-let pendingHttpCommand: any = null;
-let httpResponseResolvers: Map<string, (data: any) => void> = new Map();
-
-// HTTP server for HTTP polling fallback
-const httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
-  const url = new URL(req.url || "/", `http://localhost:${WS_PORT}`);
-
-  // Root status page
-  if (url.pathname === "/" && req.method === "GET") {
-    res.writeHead(200, { "Content-Type": "text/html" });
-    res.end(STATUS_PAGE_HTML);
-    return;
-  }
-
-  // API Status for dashboard polling
-  if (url.pathname === "/api/status" && req.method === "GET") {
-    const wsClients = Array.from(wss.clients).filter(
-      (c) => c.readyState === WebSocket.OPEN
-    ).length;
-    const isHttpConnected = Date.now() - lastHttpPollTime < HTTP_POLL_TIMEOUT;
-
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        connected: wsClients > 0 || isHttpConnected,
-        method: wsClients > 0 ? "WebSocket" : isHttpConnected ? "HTTP" : "None",
-        clientCount: wsClients + (isHttpConnected ? 1 : 0),
-      })
-    );
-    return;
-  }
-
-  // HTTP polling - return pending command if any
-  if (url.pathname === "/poll" && req.method === "GET") {
-    lastHttpPollTime = Date.now();
-
-    if (pendingHttpCommand) {
-      const cmd = pendingHttpCommand;
-      pendingHttpCommand = null;
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(cmd);
-    } else {
-      res.writeHead(204);
-      res.end();
-    }
-    return;
-  }
-
-  // HTTP polling - receive response from client
-  if (url.pathname === "/respond" && req.method === "POST") {
-    let body = "";
-    req.on("data", (chunk) => {
-      body += chunk.toString();
-    });
-
-    req.on("end", () => {
-      try {
-        const data = JSON.parse(body);
-        if (data.id && httpResponseResolvers.has(data.id)) {
-          httpResponseResolvers.get(data.id)?.(data);
-          httpResponseResolvers.delete(data.id);
-        }
-
-        res.writeHead(200);
-        res.end("OK");
-      } catch {
-        res.writeHead(400);
-        res.end("Invalid JSON");
-      }
-    });
-    return;
-  }
-
-  res.writeHead(200);
-  res.end("MCP Server Running");
-});
-
-// WebSocket server
-const wss = new WebSocketServer({ server: httpServer });
-
-httpServer.listen(WS_PORT, () => {
-  console.error(`MCP Bridge listening on port ${WS_PORT} (WebSocket + HTTP)`);
-});
-
-function hasConnectedClients(): boolean {
-  // WebSocket clients
-  for (const client of wss.clients) {
-    if (client.readyState === WebSocket.OPEN) {
-      return true;
-    }
-  }
-
-  // HTTP polling client (with timeout check)
-  return Date.now() - lastHttpPollTime < HTTP_POLL_TIMEOUT;
-}
 
 const NO_CLIENT_ERROR = {
   content: [
@@ -374,45 +298,64 @@ const NO_CLIENT_ERROR = {
   ],
 };
 
-function GetResponseOfIdFromClient(id: string): Promise<any> {
-  return new Promise((resolve) => {
-    // Check if we have WebSocket clients
-    let hasWsClient = false;
-    for (const client of wss.clients) {
-      if (client.readyState === WebSocket.OPEN) {
-        hasWsClient = true;
+// ─── Abstraction layer — these work in both primary & secondary mode ────────────
 
-        // On message event handler
-        client.onmessage = (event) => {
-          const data = JSON.parse(event.data.toString());
-          if (data.id === id) {
-            resolve(data);
-          }
-        };
+function hasConnectedClients(): boolean {
+  if (instanceRole === "secondary") {
+    return relaySocket !== null && relaySocket.readyState === WebSocket.OPEN;
+  }
+
+  // Primary: check for Roblox WS clients (exclude relay clients)
+  if (wss) {
+    for (const client of wss.clients) {
+      if (client.readyState === WebSocket.OPEN && !relayClients.has(client)) {
+        return true;
       }
     }
+  }
 
-    // HTTP response resolver if no WebSocket client
-    if (!hasWsClient) {
-      httpResponseResolvers.set(id, resolve);
-    }
-  });
+  // HTTP polling client
+  return Date.now() - lastHttpPollTime < HTTP_POLL_TIMEOUT;
 }
 
 function SendToClients(message: string) {
-  // WebSocket clients
-  let hasWsClient = false;
-  wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      hasWsClient = true;
-      client.send(message);
+  if (instanceRole === "secondary") {
+    // Forward through relay socket
+    if (relaySocket && relaySocket.readyState === WebSocket.OPEN) {
+      relaySocket.send(message);
     }
-  });
+    return;
+  }
+
+  // Primary: send to Roblox WS clients (not relay clients)
+  let hasWsClient = false;
+  if (wss) {
+    wss.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN && !relayClients.has(client)) {
+        hasWsClient = true;
+        client.send(message);
+      }
+    });
+  }
 
   // Queue for HTTP polling
   if (!hasWsClient) {
     pendingHttpCommand = message;
   }
+}
+
+function GetResponseOfIdFromClient(id: string): Promise<any> {
+  return new Promise((resolve) => {
+    if (instanceRole === "secondary") {
+      // Wait for response on relay socket
+      secondaryResponseResolvers.set(id, resolve);
+      return;
+    }
+
+    // Primary: responses arrive via wss on("message") → handleRobloxResponse()
+    // or via HTTP /respond endpoint — both resolve through httpResponseResolvers.
+    httpResponseResolvers.set(id, resolve);
+  });
 }
 
 function SendArbitraryDataToClient(
@@ -438,6 +381,301 @@ function SendArbitraryDataToClient(
 
   return id;
 }
+
+// ─── Primary mode ───────────────────────────────────────────────────────────────
+
+function startAsPrimary(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    instanceRole = "primary";
+
+    // Reset primary state
+    lastHttpPollTime = 0;
+    pendingHttpCommand = null;
+    httpResponseResolvers = new Map();
+    relayClients = new Set();
+    relayRequestOrigin = new Map();
+
+    httpServer = createServer(
+      (req: IncomingMessage, res: ServerResponse) => {
+        const url = new URL(req.url || "/", `http://localhost:${WS_PORT}`);
+
+        // Root status page
+        if (url.pathname === "/" && req.method === "GET") {
+          res.writeHead(200, { "Content-Type": "text/html" });
+          res.end(STATUS_PAGE_HTML);
+          return;
+        }
+
+        // API Status for dashboard polling
+        if (url.pathname === "/api/status" && req.method === "GET") {
+          const wsClients = wss
+            ? Array.from(wss.clients).filter(
+                (c) =>
+                  c.readyState === WebSocket.OPEN && !relayClients.has(c)
+              ).length
+            : 0;
+          const isHttpConnected =
+            Date.now() - lastHttpPollTime < HTTP_POLL_TIMEOUT;
+
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(
+            JSON.stringify({
+              connected: wsClients > 0 || isHttpConnected,
+              method:
+                wsClients > 0
+                  ? "WebSocket"
+                  : isHttpConnected
+                    ? "HTTP"
+                    : "None",
+              clientCount: wsClients + (isHttpConnected ? 1 : 0),
+              role: "Primary",
+              relayClients: relayClients.size,
+            })
+          );
+          return;
+        }
+
+        // HTTP polling - return pending command if any
+        if (url.pathname === "/poll" && req.method === "GET") {
+          lastHttpPollTime = Date.now();
+
+          if (pendingHttpCommand) {
+            const cmd = pendingHttpCommand;
+            pendingHttpCommand = null;
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end(cmd);
+          } else {
+            res.writeHead(204);
+            res.end();
+          }
+          return;
+        }
+
+        // HTTP polling - receive response from client
+        if (url.pathname === "/respond" && req.method === "POST") {
+          let body = "";
+          req.on("data", (chunk) => {
+            body += chunk.toString();
+          });
+
+          req.on("end", () => {
+            try {
+              const data = JSON.parse(body);
+              handleRobloxResponse(data);
+              res.writeHead(200);
+              res.end("OK");
+            } catch {
+              res.writeHead(400);
+              res.end("Invalid JSON");
+            }
+          });
+          return;
+        }
+
+        res.writeHead(200);
+        res.end("MCP Server Running");
+      }
+    );
+
+    httpServer.on("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EADDRINUSE") {
+        reject(err);
+      } else {
+        console.error("[Primary] HTTP server error:", err);
+        reject(err);
+      }
+    });
+
+    httpServer.listen(WS_PORT, () => {
+      console.error(
+        `[Primary] MCP Bridge listening on port ${WS_PORT} (WebSocket + HTTP)`
+      );
+
+      // Create WSS only after listen succeeds to avoid unhandled error propagation
+      wss = new WebSocketServer({ server: httpServer! });
+
+      wss.on("connection", (ws, req) => {
+        const urlPath = req.url || "/";
+
+        if (urlPath === "/mcp-relay") {
+          // ── Secondary MCP instance connecting as relay ──
+          console.error(`[Primary] Relay client connected. Total: ${relayClients.size + 1}`);
+          relayClients.add(ws);
+
+          ws.on("message", (rawData) => {
+            try {
+              const message = JSON.parse(rawData.toString());
+
+              // This is a tool-call request from a secondary, forward to Roblox
+              if (message.id) {
+                relayRequestOrigin.set(message.id, ws);
+              }
+
+              // Forward to actual Roblox clients
+              let sentToRoblox = false;
+              wss!.clients.forEach((client) => {
+                if (
+                  client.readyState === WebSocket.OPEN &&
+                  !relayClients.has(client)
+                ) {
+                  sentToRoblox = true;
+                  client.send(rawData.toString());
+                }
+              });
+
+              // Fallback to HTTP polling queue
+              if (!sentToRoblox) {
+                pendingHttpCommand = rawData.toString();
+              }
+            } catch (e) {
+              console.error("[Primary] Error parsing relay message:", e);
+            }
+          });
+
+          ws.on("close", () => {
+            relayClients.delete(ws);
+            console.error(`[Primary] Relay client disconnected. Total: ${relayClients.size}`);
+            // Clean up any pending request origins for this client
+            for (const [id, origin] of relayRequestOrigin.entries()) {
+              if (origin === ws) {
+                relayRequestOrigin.delete(id);
+              }
+            }
+          });
+
+          ws.on("error", (err) => {
+            console.error("[Primary] Relay client error:", err.message);
+            relayClients.delete(ws);
+          });
+
+          return;
+        }
+
+        // ── Regular Roblox game client ──
+        console.error("[Primary] Roblox client connected via WebSocket.");
+
+        ws.on("message", (rawData) => {
+          try {
+            const data = JSON.parse(rawData.toString());
+            handleRobloxResponse(data);
+          } catch (e) {
+            console.error("[Primary] Error parsing Roblox WS message:", e);
+          }
+        });
+
+        ws.on("close", () => {
+          console.error("[Primary] Roblox client disconnected.");
+        });
+      });
+
+      resolve();
+    });
+  });
+}
+
+/**
+ * Route a response from a Roblox client.
+ * If the request originated from a relay secondary, forward it back.
+ * Otherwise resolve the local promise.
+ */
+function handleRobloxResponse(data: any) {
+  if (!data.id) return;
+
+  // Check if this response belongs to a relayed secondary request
+  const originRelay = relayRequestOrigin.get(data.id);
+  if (originRelay && originRelay.readyState === WebSocket.OPEN) {
+    originRelay.send(JSON.stringify(data));
+    relayRequestOrigin.delete(data.id);
+    return;
+  }
+  relayRequestOrigin.delete(data.id);
+
+  // Otherwise it's a local primary request
+  if (httpResponseResolvers.has(data.id)) {
+    httpResponseResolvers.get(data.id)?.(data);
+    httpResponseResolvers.delete(data.id);
+  }
+}
+
+// ─── Secondary mode ─────────────────────────────────────────────────────────────
+
+function startAsSecondary(): void {
+  instanceRole = "secondary";
+  secondaryResponseResolvers = new Map();
+
+  console.error(
+    `[Secondary] Port ${WS_PORT} in use. Connecting to primary via relay...`
+  );
+
+  relaySocket = new WebSocket(`ws://localhost:${WS_PORT}/mcp-relay`);
+
+  relaySocket.on("open", () => {
+    console.error("[Secondary] Connected to primary via /mcp-relay.");
+  });
+
+  relaySocket.on("message", (rawData) => {
+    try {
+      const data = JSON.parse(rawData.toString());
+      if (data.id && secondaryResponseResolvers.has(data.id)) {
+        secondaryResponseResolvers.get(data.id)!(data);
+        secondaryResponseResolvers.delete(data.id);
+      }
+    } catch (e) {
+      console.error("[Secondary] Error parsing relay response:", e);
+    }
+  });
+
+  relaySocket.on("close", () => {
+    console.error("[Secondary] Lost connection to primary. Attempting promotion...");
+    relaySocket = null;
+    // Reject all pending resolvers so tool calls don't hang forever
+    for (const [id, resolver] of secondaryResponseResolvers.entries()) {
+      resolver({ id, output: undefined });
+    }
+    secondaryResponseResolvers.clear();
+    tryPromote();
+  });
+
+  relaySocket.on("error", (err) => {
+    console.error("[Secondary] Relay socket error:", err.message);
+  });
+}
+
+// ─── Promotion / Boot ───────────────────────────────────────────────────────────
+
+function tryPromote() {
+  // Random jitter to avoid multiple secondaries racing
+  const jitter = Math.floor(Math.random() * PROMOTION_JITTER_MAX);
+  console.error(`[Promote] Waiting ${jitter}ms before attempting promotion...`);
+
+  setTimeout(async () => {
+    try {
+      await startAsPrimary();
+      console.error("[Promote] Successfully promoted to primary!");
+    } catch {
+      console.error(
+        "[Promote] Another instance already claimed primary. Reconnecting as secondary..."
+      );
+      // Small delay before reconnecting to let the new primary fully start
+      setTimeout(() => startAsSecondary(), 200);
+    }
+  }, jitter);
+}
+
+async function boot() {
+  try {
+    await startAsPrimary();
+  } catch (err: any) {
+    if (err?.code === "EADDRINUSE") {
+      startAsSecondary();
+    } else {
+      console.error("[Boot] Fatal error:", err);
+      process.exit(1);
+    }
+  }
+}
+
+// ─── Tool registrations (work in both primary & secondary mode) ─────────────────
 
 server.registerTool(
   "execute",
@@ -874,6 +1112,10 @@ server.registerTool(
   }
 );
 
+// ─── Start everything ───────────────────────────────────────────────────────────
+
 const transport = new StdioServerTransport();
 server.connect(transport);
 console.error("MCP Server started and connected via stdio.");
+
+boot();
