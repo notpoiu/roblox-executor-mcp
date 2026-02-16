@@ -1,4 +1,4 @@
-# Roblox MCP Server
+# Roblox Executor MCP Server
 
 A Model Context Protocol (MCP) server that provides full control and introspection of a running Roblox Game Client. It acts as a bridge between LLMs and your Roblox game session.
 
@@ -81,10 +81,11 @@ Add this to your `claude_desktop_config.json`:
 1. Go to **Settings > MCP Settings**
 2. Click **⚙️ Open MCP Settings**
 3. Click on **+ Add server**
-4. Set Type to `STDIO`
-5. Set Command to `node`
-6. Set Arguments to `/path/to/MCPServer/dist/index.js`
-7. Click **Save**
+4. Set Name to `roblox-executor-mcp`
+5. Set Type to `STDIO`
+6. Set Command to `node`
+7. Set Arguments to `/path/to/MCPServer/dist/index.js`
+8. Click **Save**
 
 ### 2. Connect from Roblox
 
@@ -93,7 +94,7 @@ In your Roblox executor, run the contents of `connector.luau`. You can also use 
 ```lua
 -- getgenv().BridgeURL = "10.0.0.4:16384" (defaults to localhost, dont change unless you know what you are doing!)
 -- getgenv().DisableWebSocket = true
-loadstring(game:HttpGet("https://raw.githubusercontent.com/notpoiu/roblox-mcp/refs/heads/main/connector.luau"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/notpoiu/roblox-executor-mcp/refs/heads/main/connector.luau"))()
 ```
 
 
