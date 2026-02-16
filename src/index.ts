@@ -15,14 +15,30 @@ const PROMOTION_JITTER_MAX = 300; // ms
 // ─── Instance role ──────────────────────────────────────────────────────────────
 let instanceRole: "primary" | "secondary" = "primary";
 
+// ─── Roblox Client Registry ─────────────────────────────────────────────────────
+interface RobloxClient {
+  clientId: string;
+  username: string;
+  placeId: number;
+  jobId: string;
+  placeName: string;
+  transport: "ws" | "http";
+  ws?: WebSocket;
+  lastHttpPoll: number;
+  pendingHttpCommand: any;
+}
+
+let clientRegistry: Map<string, RobloxClient> = new Map();
+// Map ws → clientId for quick lookup on message/close
+let wsToClientId: Map<WebSocket, string> = new Map();
+
 // ─── Primary-mode state ─────────────────────────────────────────────────────────
 let httpServer: ReturnType<typeof createServer> | null = null;
 let wss: WebSocketServer | null = null;
 
-// HTTP polling state (primary only)
-let lastHttpPollTime = 0;
-let pendingHttpCommand: any = null;
 let httpResponseResolvers: Map<string, (data: any) => void> = new Map();
+// Track which clientId a given request id was sent to (for response routing)
+let requestToClientId: Map<string, string> = new Map();
 
 // Relay clients (secondaries connected to this primary)
 let relayClients: Set<WebSocket> = new Set();
@@ -217,10 +233,6 @@ const STATUS_PAGE_HTML = `
             
             <div class="stats">
                 <div class="stat-item">
-                    <div class="stat-label">Connection</div>
-                    <div class="stat-value" id="methodValue">None</div>
-                </div>
-                <div class="stat-item">
                     <div class="stat-label">Clients</div>
                     <div class="stat-value" id="clientCount">0</div>
                 </div>
@@ -233,6 +245,8 @@ const STATUS_PAGE_HTML = `
                     <div class="stat-value" id="relayCount">0</div>
                 </div>
             </div>
+
+            <div id="clientList" style="margin-top:12px;text-align:left;font-size:13px;color:#aaa;"></div>
         </div>
     </div>
 
@@ -241,10 +255,10 @@ const STATUS_PAGE_HTML = `
         const statusText = document.getElementById('statusText');
         const subText = document.getElementById('subText');
         const statusEmoji = document.getElementById('statusEmoji');
-        const methodValue = document.getElementById('methodValue');
         const clientCountValue = document.getElementById('clientCount');
         const roleValue = document.getElementById('roleValue');
         const relayCountValue = document.getElementById('relayCount');
+        const clientListDiv = document.getElementById('clientList');
 
         async function updateStatus() {
             try {
@@ -262,15 +276,25 @@ const STATUS_PAGE_HTML = `
                     statusEmoji.innerText = '×';
                 }
 
-                methodValue.innerText = data.method;
                 clientCountValue.innerText = data.clientCount;
                 roleValue.innerText = data.role;
                 relayCountValue.innerText = data.relayClients;
+
+                if (data.clients && data.clients.length > 0) {
+                    clientListDiv.innerHTML = data.clients.map(c =>
+                        '<div style="padding:4px 0;border-bottom:1px solid #333;">' +
+                        '<strong>' + c.username + '</strong> — ' + c.placeName +
+                        ' <span style="opacity:0.5">(' + c.transport.toUpperCase() + ')</span>' +
+                        '<br><span style="font-size:11px;opacity:0.5">' + c.clientId + '</span>' +
+                        '</div>'
+                    ).join('');
+                } else {
+                    clientListDiv.innerHTML = '';
+                }
             } catch (e) {
                 statusCard.className = 'card disconnected';
                 statusText.innerText = 'Offline';
                 statusEmoji.innerText = '!';
-                methodValue.innerText = 'Error';
             }
         }
 
@@ -298,62 +322,105 @@ const NO_CLIENT_ERROR = {
   ],
 };
 
+// ─── Client registry helpers ────────────────────────────────────────────────────
+
+function registerClient(info: {
+  username: string;
+  placeId: number;
+  jobId: string;
+  placeName: string;
+  transport: "ws" | "http";
+  ws?: WebSocket;
+}): string {
+  const clientId = crypto.randomUUID();
+  const entry: RobloxClient = {
+    clientId,
+    username: info.username,
+    placeId: info.placeId,
+    jobId: info.jobId,
+    placeName: info.placeName,
+    transport: info.transport,
+    ws: info.ws,
+    lastHttpPoll: Date.now(),
+    pendingHttpCommand: null,
+  };
+  clientRegistry.set(clientId, entry);
+  if (info.ws) {
+    wsToClientId.set(info.ws, clientId);
+  }
+  console.error(
+    `[Registry] Client registered: ${clientId} (${info.username} @ ${info.placeName}, ${info.transport})`
+  );
+  return clientId;
+}
+
+function unregisterClient(clientId: string) {
+  const entry = clientRegistry.get(clientId);
+  if (entry?.ws) {
+    wsToClientId.delete(entry.ws);
+  }
+  clientRegistry.delete(clientId);
+  console.error(`[Registry] Client unregistered: ${clientId}`);
+}
+
+function getActiveClients(): RobloxClient[] {
+  const active: RobloxClient[] = [];
+  for (const entry of clientRegistry.values()) {
+    if (entry.transport === "ws") {
+      if (entry.ws && entry.ws.readyState === WebSocket.OPEN) {
+        active.push(entry);
+      }
+    } else {
+      if (Date.now() - entry.lastHttpPoll < HTTP_POLL_TIMEOUT) {
+        active.push(entry);
+      }
+    }
+  }
+  return active;
+}
+
+/** Resolve a target client by clientId, or pick the most recently active one. */
+function resolveTargetClient(clientId?: string): RobloxClient | null {
+  if (clientId) {
+    const entry = clientRegistry.get(clientId);
+    if (!entry) return null;
+    // Verify it's still alive
+    if (entry.transport === "ws" && (!entry.ws || entry.ws.readyState !== WebSocket.OPEN)) return null;
+    if (entry.transport === "http" && Date.now() - entry.lastHttpPoll >= HTTP_POLL_TIMEOUT) return null;
+    return entry;
+  }
+  // Default: most recently active
+  const active = getActiveClients();
+  if (active.length === 0) return null;
+  // Prefer WS clients, then most recent HTTP poll
+  const wsCl = active.filter((c) => c.transport === "ws");
+  if (wsCl.length > 0) return wsCl[wsCl.length - 1];
+  return active.sort((a, b) => b.lastHttpPoll - a.lastHttpPoll)[0];
+}
+
 // ─── Abstraction layer — these work in both primary & secondary mode ────────────
 
 function hasConnectedClients(): boolean {
   if (instanceRole === "secondary") {
     return relaySocket !== null && relaySocket.readyState === WebSocket.OPEN;
   }
-
-  // Primary: check for Roblox WS clients (exclude relay clients)
-  if (wss) {
-    for (const client of wss.clients) {
-      if (client.readyState === WebSocket.OPEN && !relayClients.has(client)) {
-        return true;
-      }
-    }
-  }
-
-  // HTTP polling client
-  return Date.now() - lastHttpPollTime < HTTP_POLL_TIMEOUT;
+  return getActiveClients().length > 0;
 }
 
-function SendToClients(message: string) {
-  if (instanceRole === "secondary") {
-    // Forward through relay socket
-    if (relaySocket && relaySocket.readyState === WebSocket.OPEN) {
-      relaySocket.send(message);
-    }
-    return;
-  }
-
-  // Primary: send to Roblox WS clients (not relay clients)
-  let hasWsClient = false;
-  if (wss) {
-    wss.clients.forEach((client) => {
-      if (client.readyState === WebSocket.OPEN && !relayClients.has(client)) {
-        hasWsClient = true;
-        client.send(message);
-      }
-    });
-  }
-
-  // Queue for HTTP polling
-  if (!hasWsClient) {
-    pendingHttpCommand = message;
+function SendToClient(target: RobloxClient, message: string) {
+  if (target.transport === "ws" && target.ws && target.ws.readyState === WebSocket.OPEN) {
+    target.ws.send(message);
+  } else if (target.transport === "http") {
+    target.pendingHttpCommand = message;
   }
 }
 
 function GetResponseOfIdFromClient(id: string): Promise<any> {
   return new Promise((resolve) => {
     if (instanceRole === "secondary") {
-      // Wait for response on relay socket
       secondaryResponseResolvers.set(id, resolve);
       return;
     }
-
-    // Primary: responses arrive via wss on("message") → handleRobloxResponse()
-    // or via HTTP /respond endpoint — both resolve through httpResponseResolvers.
     httpResponseResolvers.set(id, resolve);
   });
 }
@@ -361,23 +428,26 @@ function GetResponseOfIdFromClient(id: string): Promise<any> {
 function SendArbitraryDataToClient(
   type: string,
   data: any,
-  id: string | undefined = undefined
+  id: string | undefined = undefined,
+  clientId: string | undefined = undefined,
 ) {
-  if (!hasConnectedClients()) {
-    return null;
+  if (instanceRole === "secondary") {
+    // Secondaries relay everything through
+    if (!relaySocket || relaySocket.readyState !== WebSocket.OPEN) return null;
+    if (id === undefined) id = crypto.randomUUID();
+    const message = { id, ...data, type, ...(clientId ? { targetClientId: clientId } : {}) };
+    relaySocket.send(JSON.stringify(message));
+    return id;
   }
 
-  if (id === undefined) {
-    id = crypto.randomUUID();
-  }
+  const target = resolveTargetClient(clientId);
+  if (!target) return null;
 
-  const message = {
-    id,
-    ...data,
-    type,
-  };
+  if (id === undefined) id = crypto.randomUUID();
 
-  SendToClients(JSON.stringify(message));
+  const message = { id, ...data, type };
+  requestToClientId.set(id, target.clientId);
+  SendToClient(target, JSON.stringify(message));
 
   return id;
 }
@@ -389,9 +459,10 @@ function startAsPrimary(): Promise<void> {
     instanceRole = "primary";
 
     // Reset primary state
-    lastHttpPollTime = 0;
-    pendingHttpCommand = null;
+    clientRegistry = new Map();
+    wsToClientId = new Map();
     httpResponseResolvers = new Map();
+    requestToClientId = new Map();
     relayClients = new Set();
     relayRequestOrigin = new Map();
 
@@ -399,49 +470,81 @@ function startAsPrimary(): Promise<void> {
       (req: IncomingMessage, res: ServerResponse) => {
         const url = new URL(req.url || "/", `http://localhost:${WS_PORT}`);
 
-        // Root status page
+        // ── Root status page ──
         if (url.pathname === "/" && req.method === "GET") {
           res.writeHead(200, { "Content-Type": "text/html" });
           res.end(STATUS_PAGE_HTML);
           return;
         }
 
-        // API Status for dashboard polling
+        // ── API Status ──
         if (url.pathname === "/api/status" && req.method === "GET") {
-          const wsClients = wss
-            ? Array.from(wss.clients).filter(
-                (c) =>
-                  c.readyState === WebSocket.OPEN && !relayClients.has(c)
-              ).length
-            : 0;
-          const isHttpConnected =
-            Date.now() - lastHttpPollTime < HTTP_POLL_TIMEOUT;
-
+          const active = getActiveClients();
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(
             JSON.stringify({
-              connected: wsClients > 0 || isHttpConnected,
-              method:
-                wsClients > 0
-                  ? "WebSocket"
-                  : isHttpConnected
-                    ? "HTTP"
-                    : "None",
-              clientCount: wsClients + (isHttpConnected ? 1 : 0),
+              connected: active.length > 0,
+              clientCount: active.length,
               role: "Primary",
               relayClients: relayClients.size,
+              clients: active.map((c) => ({
+                clientId: c.clientId,
+                username: c.username,
+                placeId: c.placeId,
+                jobId: c.jobId,
+                placeName: c.placeName,
+                transport: c.transport,
+              })),
             })
           );
           return;
         }
 
-        // HTTP polling - return pending command if any
-        if (url.pathname === "/poll" && req.method === "GET") {
-          lastHttpPollTime = Date.now();
+        // ── HTTP client registration ──
+        if (url.pathname === "/register" && req.method === "POST") {
+          let body = "";
+          req.on("data", (chunk) => { body += chunk.toString(); });
+          req.on("end", () => {
+            try {
+              const info = JSON.parse(body);
+              const clientId = registerClient({
+                username: info.username || "Unknown",
+                placeId: info.placeId || 0,
+                jobId: info.jobId || "",
+                placeName: info.placeName || "Unknown",
+                transport: "http",
+              });
+              res.writeHead(200, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ clientId }));
+            } catch {
+              res.writeHead(400);
+              res.end("Invalid JSON");
+            }
+          });
+          return;
+        }
 
-          if (pendingHttpCommand) {
-            const cmd = pendingHttpCommand;
-            pendingHttpCommand = null;
+        // ── HTTP polling — return pending command ──
+        if (url.pathname === "/poll" && req.method === "GET") {
+          const clientId = url.searchParams.get("clientId");
+          if (!clientId) {
+            res.writeHead(400);
+            res.end("Missing clientId query parameter");
+            return;
+          }
+
+          const client = clientRegistry.get(clientId);
+          if (!client) {
+            res.writeHead(404);
+            res.end("Unknown clientId");
+            return;
+          }
+
+          client.lastHttpPoll = Date.now();
+
+          if (client.pendingHttpCommand) {
+            const cmd = client.pendingHttpCommand;
+            client.pendingHttpCommand = null;
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(cmd);
           } else {
@@ -451,13 +554,10 @@ function startAsPrimary(): Promise<void> {
           return;
         }
 
-        // HTTP polling - receive response from client
+        // ── HTTP polling — receive response from client ──
         if (url.pathname === "/respond" && req.method === "POST") {
           let body = "";
-          req.on("data", (chunk) => {
-            body += chunk.toString();
-          });
-
+          req.on("data", (chunk) => { body += chunk.toString(); });
           req.on("end", () => {
             try {
               const data = JSON.parse(body);
@@ -491,7 +591,6 @@ function startAsPrimary(): Promise<void> {
         `[Primary] MCP Bridge listening on port ${WS_PORT} (WebSocket + HTTP)`
       );
 
-      // Create WSS only after listen succeeds to avoid unhandled error propagation
       wss = new WebSocketServer({ server: httpServer! });
 
       wss.on("connection", (ws, req) => {
@@ -506,26 +605,20 @@ function startAsPrimary(): Promise<void> {
             try {
               const message = JSON.parse(rawData.toString());
 
-              // This is a tool-call request from a secondary, forward to Roblox
               if (message.id) {
                 relayRequestOrigin.set(message.id, ws);
               }
 
-              // Forward to actual Roblox clients
-              let sentToRoblox = false;
-              wss!.clients.forEach((client) => {
-                if (
-                  client.readyState === WebSocket.OPEN &&
-                  !relayClients.has(client)
-                ) {
-                  sentToRoblox = true;
-                  client.send(rawData.toString());
-                }
-              });
+              // If the secondary specified a target client, route to it
+              const targetClientId = message.targetClientId;
+              if (targetClientId) {
+                delete message.targetClientId;
+              }
 
-              // Fallback to HTTP polling queue
-              if (!sentToRoblox) {
-                pendingHttpCommand = rawData.toString();
+              const target = resolveTargetClient(targetClientId);
+              if (target) {
+                requestToClientId.set(message.id, target.clientId);
+                SendToClient(target, JSON.stringify(message));
               }
             } catch (e) {
               console.error("[Primary] Error parsing relay message:", e);
@@ -535,11 +628,8 @@ function startAsPrimary(): Promise<void> {
           ws.on("close", () => {
             relayClients.delete(ws);
             console.error(`[Primary] Relay client disconnected. Total: ${relayClients.size}`);
-            // Clean up any pending request origins for this client
             for (const [id, origin] of relayRequestOrigin.entries()) {
-              if (origin === ws) {
-                relayRequestOrigin.delete(id);
-              }
+              if (origin === ws) relayRequestOrigin.delete(id);
             }
           });
 
@@ -552,11 +642,29 @@ function startAsPrimary(): Promise<void> {
         }
 
         // ── Regular Roblox game client ──
-        console.error("[Primary] Roblox client connected via WebSocket.");
+        // Client must send a { type: "register", ... } message first.
+        // Until registered, messages are buffered.
+        console.error("[Primary] Roblox client connected via WebSocket (awaiting registration).");
 
         ws.on("message", (rawData) => {
           try {
             const data = JSON.parse(rawData.toString());
+
+            // Handle registration
+            if (data.type === "register") {
+              const clientId = registerClient({
+                username: data.username || "Unknown",
+                placeId: data.placeId || 0,
+                jobId: data.jobId || "",
+                placeName: data.placeName || "Unknown",
+                transport: "ws",
+                ws,
+              });
+              // Send the clientId back
+              ws.send(JSON.stringify({ type: "registered", clientId }));
+              return;
+            }
+
             handleRobloxResponse(data);
           } catch (e) {
             console.error("[Primary] Error parsing Roblox WS message:", e);
@@ -564,6 +672,10 @@ function startAsPrimary(): Promise<void> {
         });
 
         ws.on("close", () => {
+          const clientId = wsToClientId.get(ws);
+          if (clientId) {
+            unregisterClient(clientId);
+          }
           console.error("[Primary] Roblox client disconnected.");
         });
       });
@@ -586,6 +698,7 @@ function handleRobloxResponse(data: any) {
   if (originRelay && originRelay.readyState === WebSocket.OPEN) {
     originRelay.send(JSON.stringify(data));
     relayRequestOrigin.delete(data.id);
+    requestToClientId.delete(data.id);
     return;
   }
   relayRequestOrigin.delete(data.id);
@@ -595,6 +708,7 @@ function handleRobloxResponse(data: any) {
     httpResponseResolvers.get(data.id)?.(data);
     httpResponseResolvers.delete(data.id);
   }
+  requestToClientId.delete(data.id);
 }
 
 // ─── Secondary mode ─────────────────────────────────────────────────────────────
@@ -675,7 +789,74 @@ async function boot() {
   }
 }
 
+// ─── Shared schema ──────────────────────────────────────────────────────────────
+
+const clientIdSchema = z
+  .string()
+  .describe(
+    "Target a specific Roblox client by its clientId. Use the list-clients tool to discover connected clients. If omitted, the most recently active client is used."
+  )
+  .optional();
+
 // ─── Tool registrations (work in both primary & secondary mode) ─────────────────
+
+server.registerTool(
+  "list-clients",
+  {
+    title: "List connected Roblox clients",
+    description:
+      "Returns a list of all Roblox game clients currently connected to the MCP bridge, including their clientId, username, placeId, jobId, and placeName. Use the clientId from this list to target specific clients in other tools.",
+  },
+  async () => {
+    if (instanceRole === "secondary") {
+      // Secondaries ask the primary for client list
+      const id = crypto.randomUUID();
+      if (relaySocket && relaySocket.readyState === WebSocket.OPEN) {
+        relaySocket.send(JSON.stringify({ id, type: "list-clients" }));
+        const response = await GetResponseOfIdFromClient(id);
+        return {
+          content: [
+            {
+              type: "text",
+              text: response?.output ?? "Failed to list clients.",
+            },
+          ],
+        };
+      }
+      return NO_CLIENT_ERROR;
+    }
+
+    const active = getActiveClients();
+    if (active.length === 0) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "No Roblox clients are currently connected.",
+          },
+        ],
+      };
+    }
+
+    const clientList = active.map((c) => ({
+      clientId: c.clientId,
+      username: c.username,
+      placeId: c.placeId,
+      jobId: c.jobId,
+      placeName: c.placeName,
+      transport: c.transport,
+    }));
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(clientList, null, 2),
+        },
+      ],
+    };
+  }
+);
 
 server.registerTool(
   "execute",
@@ -694,14 +875,15 @@ server.registerTool(
         )
         .optional()
         .default(8),
+      clientId: clientIdSchema,
     }),
   },
-  async ({ code, threadContext }) => {
+  async ({ code, threadContext, clientId }) => {
     console.error(`Executing code in thread ${threadContext}...`);
 
     const result = SendArbitraryDataToClient("execute", {
       source: `setthreadidentity(${threadContext})\n${code}`,
-    });
+    }, undefined, clientId);
 
     if (result === null) {
       return NO_CLIENT_ERROR;
@@ -734,9 +916,10 @@ server.registerTool(
         .string()
         .describe("The path to the script to get the content of")
         .optional(),
+      clientId: clientIdSchema,
     }),
   },
-  async ({ scriptGetterSource, scriptPath }) => {
+  async ({ scriptGetterSource, scriptPath, clientId }) => {
     if (scriptGetterSource === undefined && scriptPath === undefined) {
       return {
         success: false,
@@ -764,7 +947,7 @@ server.registerTool(
         scriptGetterSource === undefined
           ? `return ${scriptPath}`
           : scriptGetterSource,
-    });
+    }, undefined, clientId);
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;
@@ -815,14 +998,15 @@ server.registerTool(
         )
         .optional()
         .default(8),
+      clientId: clientIdSchema,
     }),
   },
-  async ({ code, threadContext }) => {
+  async ({ code, threadContext, clientId }) => {
     console.error(`Executing code in thread ${threadContext}...`);
 
     const toolCallId = SendArbitraryDataToClient("get-data-by-code", {
       source: `setthreadidentity(${threadContext});${code}`,
-    });
+    }, undefined, clientId);
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;
@@ -877,13 +1061,14 @@ server.registerTool(
         .describe("The order of the logs to return (default: NewestFirst)")
         .optional()
         .default("NewestFirst"),
+      clientId: clientIdSchema,
     }),
   },
-  async ({ limit, logsOrder }) => {
+  async ({ limit, logsOrder, clientId }) => {
     const toolCallId = SendArbitraryDataToClient("get-console-output", {
       limit,
       logsOrder,
-    });
+    }, undefined, clientId);
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;
@@ -956,14 +1141,15 @@ COMBINING SELECTORS: Chain selectors for AND logic. Example: Part.Tagged[Anchore
         )
         .optional()
         .default(50),
+      clientId: clientIdSchema,
     }),
   },
-  async ({ selector, root, limit }) => {
+  async ({ selector, root, limit, clientId }) => {
     const toolCallId = SendArbitraryDataToClient("search-instances", {
       selector,
       root,
       limit,
-    });
+    }, undefined, clientId);
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;
@@ -1032,13 +1218,14 @@ server.registerTool(
         )
         .optional()
         .default(20),
+      clientId: clientIdSchema,
     }),
   },
-  async ({ query, limit }) => {
+  async ({ query, limit, clientId }) => {
     const toolCallId = SendArbitraryDataToClient("search-scripts-sources", {
       query,
       limit,
-    });
+    }, undefined, clientId);
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;
@@ -1081,9 +1268,12 @@ server.registerTool(
     title: "Get information about the current Roblox game",
     description:
       "Retrieves basic information about the current game including PlaceId, GameId, PlaceVersion, and other metadata.",
+    inputSchema: z.object({
+      clientId: clientIdSchema,
+    }),
   },
-  async () => {
-    const toolCallId = SendArbitraryDataToClient("get-game-info", {});
+  async ({ clientId }: { clientId?: string }) => {
+    const toolCallId = SendArbitraryDataToClient("get-game-info", {}, undefined, clientId);
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;
@@ -1144,15 +1334,16 @@ server.registerTool(
         )
         .optional()
         .default(50),
+      clientId: clientIdSchema,
     }),
   },
-  async ({ root, maxDepth, classFilter, maxChildren }) => {
+  async ({ root, maxDepth, classFilter, maxChildren, clientId }) => {
     const toolCallId = SendArbitraryDataToClient("get-descendants-tree", {
       root,
       maxDepth,
       classFilter: classFilter || "",
       maxChildren,
-    });
+    }, undefined, clientId);
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;

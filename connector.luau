@@ -20,12 +20,30 @@ local CoreGui = cloneref(game:GetService("CoreGui"))
 local CorePackages = cloneref(game:GetService("CorePackages"))
 local HttpService = cloneref(game:GetService("HttpService"))
 local LogService = cloneref(game:GetService("LogService"))
+local Players = cloneref(game:GetService("Players"))
 
 --// Compatibility Check \\--
 local WebSocketAvailable = (
     typeof(WebSocket) ~= "nil" and
     typeof(WebSocket.connect) == "function"
 ) and (getgenv().DisableWebSocket ~= true)
+
+--// Registration Info \\--
+local function GetRegistrationInfo()
+    local player = Players.LocalPlayer
+    local placeName = "Unknown"
+    pcall(function()
+        local productInfo = MarketplaceService:GetProductInfo(game.PlaceId)
+        placeName = productInfo.Name
+    end)
+    return {
+        type = "register",
+        username = player and player.Name or "Unknown",
+        placeId = game.PlaceId,
+        jobId = game.JobId,
+        placeName = placeName,
+    }
+end
 
 --// Base Bridge Class \\--
 local BaseBridge = {}; do
@@ -127,6 +145,11 @@ local WebSocketBridge = setmetatable({}, {__index = BaseBridge}); do
         self.WebSocket = WebSocket.connect("ws://" .. BridgeURL)
         self.Connected = true
         self.Callbacks = {}
+        self.ClientId = nil
+
+        --// Send registration \\--
+        self.WebSocket:Send(HttpService:JSONEncode(GetRegistrationInfo()))
+
         self.AliveThread = task.spawn(function()
             while task.wait(1) do
                 if self:IsAlive() or not self.Connected then
@@ -145,6 +168,13 @@ local WebSocketBridge = setmetatable({}, {__index = BaseBridge}); do
         --// On Message \\--
         self.WebSocket.OnMessage:Connect(function(message)
             local data = HttpService:JSONDecode(message)
+
+            --// Handle registration response \\--
+            if data.type == "registered" then
+                self.ClientId = data.clientId
+                return
+            end
+
             local response = self:HandleMessage(data)
             if response then
                 self.WebSocket:Send(HttpService:JSONEncode(response))
@@ -181,6 +211,21 @@ local HTTPBridge = setmetatable({}, {__index = BaseBridge}); do
         self.Connected = true
         self.Callbacks = {}
         self.PollInterval = 0.1
+        self.ClientId = nil
+
+        --// Register with the server \\--
+        pcall(function()
+            local regResponse = request({
+                Url = "http://" .. BridgeURL .. "/register",
+                Method = "POST",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body = HttpService:JSONEncode(GetRegistrationInfo()),
+            })
+            if regResponse.StatusCode == 200 and regResponse.Body then
+                local regData = HttpService:JSONDecode(regResponse.Body)
+                self.ClientId = regData.clientId
+            end
+        end)
     
         --// Start polling thread \\--
         self.PollThread = task.spawn(function()
@@ -188,8 +233,12 @@ local HTTPBridge = setmetatable({}, {__index = BaseBridge}); do
             
             while self.Connected do
                 local success, _ = pcall(function()
+                    local pollUrl = "http://" .. BridgeURL .. "/poll"
+                    if self.ClientId then
+                        pollUrl = pollUrl .. "?clientId=" .. self.ClientId
+                    end
                     local response = request({
-                        Url = "http://" .. BridgeURL .. "/poll",
+                        Url = pollUrl,
                         Method = "GET"
                     })
 
