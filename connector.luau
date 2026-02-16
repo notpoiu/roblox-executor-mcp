@@ -39,6 +39,7 @@ local function GetRegistrationInfo()
     return {
         type = "register",
         username = player and player.Name or "Unknown",
+        userId = player and player.UserId or 0,
         placeId = game.PlaceId,
         jobId = game.JobId,
         placeName = placeName,

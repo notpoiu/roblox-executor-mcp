@@ -20,6 +20,7 @@ let instanceRole: "primary" | "secondary" = "primary";
 interface RobloxClient {
   clientId: string;
   username: string;
+  userId: number;
   placeId: number;
   jobId: string;
   placeName: string;
@@ -57,209 +58,774 @@ const STATUS_PAGE_HTML = `
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Roblox MCP Status</title>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&family=JetBrains+Mono&display=swap" rel="stylesheet">
+    <title>Roblox MCP — Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
+        /* ── Reset & Tokens ──────────────────────────────────────── */
         :root {
-            --bg: #0a0a0c;
-            --card: rgba(20, 20, 25, 0.7);
-            --border: rgba(255, 255, 255, 0.1);
-            --primary: #5865F2;
-            --success: #10b981;
-            --error: #ef4444;
-            --text: #ffffff;
-            --text-dim: #94a3b8;
+            --bg: #09090b;
+            --surface: rgba(255,255,255,0.03);
+            --surface-raised: rgba(255,255,255,0.05);
+            --border: rgba(255,255,255,0.06);
+            --border-highlight: rgba(255,255,255,0.1);
+            --accent: #2dd4bf;
+            --accent-dim: rgba(45,212,191,0.15);
+            --accent-glow: rgba(45,212,191,0.3);
+            --amber: #f59e0b;
+            --amber-dim: rgba(245,158,11,0.15);
+            --success: #34d399;
+            --error: #f87171;
+            --error-dim: rgba(248,113,113,0.12);
+            --text: #fafafa;
+            --text-secondary: #a1a1aa;
+            --text-tertiary: #52525b;
+            --mono: 'IBM Plex Mono', monospace;
+            --sans: 'Instrument Sans', system-ui, sans-serif;
+            --radius: 16px;
+            --radius-sm: 10px;
         }
 
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
+        *, *::before, *::after {
+            margin: 0; padding: 0; box-sizing: border-box;
         }
+
+        html { height: 100%; }
 
         body {
-            font-family: 'Outfit', sans-serif;
+            font-family: var(--sans);
             background: var(--bg);
-            background-image: 
-                radial-gradient(at 0% 0%, rgba(88, 101, 242, 0.15) 0px, transparent 50%),
-                radial-gradient(at 100% 100%, rgba(16, 185, 129, 0.1) 0px, transparent 50%);
             color: var(--text);
-            height: 100vh;
+            min-height: 100vh;
+            overflow-x: hidden;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+
+        /* ── Animated background layers ──────────────────────────── */
+        .bg-layer {
+            position: fixed; inset: 0; z-index: 0; pointer-events: none;
+        }
+
+        .bg-gradient {
+            background:
+                radial-gradient(ellipse 80% 60% at 10% 20%, rgba(45,212,191,0.08) 0%, transparent 60%),
+                radial-gradient(ellipse 60% 80% at 90% 80%, rgba(245,158,11,0.06) 0%, transparent 60%),
+                radial-gradient(ellipse 50% 50% at 50% 50%, rgba(45,212,191,0.03) 0%, transparent 80%);
+            animation: bgShift 20s ease-in-out infinite alternate;
+        }
+
+        @keyframes bgShift {
+            0% { opacity: 1; filter: hue-rotate(0deg); }
+            100% { opacity: 0.7; filter: hue-rotate(15deg); }
+        }
+
+        .bg-grid {
+            background-image: radial-gradient(circle, rgba(255,255,255,0.03) 1px, transparent 1px);
+            background-size: 32px 32px;
+        }
+
+        .bg-noise {
+            opacity: 0.015;
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+            background-repeat: repeat;
+            background-size: 256px 256px;
+        }
+
+
+
+        /* ── Shell layout ────────────────────────────────────────── */
+        .shell {
+            position: relative; z-index: 1;
+            max-width: 720px;
+            margin: 0 auto;
+            padding: 2rem 1.5rem 3rem;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* ── Header ──────────────────────────────────────────────── */
+        .header {
             display: flex;
             align-items: center;
-            justify-content: center;
-            overflow: hidden;
+            justify-content: space-between;
+            padding: 0.75rem 0;
+            margin-bottom: 2.5rem;
+            animation: fadeDown 0.7s cubic-bezier(0.16,1,0.3,1) both;
         }
 
-        .container {
-            width: 100%;
-            max-width: 480px;
-            padding: 2rem;
-            position: relative;
-        }
-
-        .card {
-            background: var(--card);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border: 1px solid var(--border);
-            border-radius: 24px;
-            padding: 3rem 2rem;
-            text-align: center;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-            animation: slideUp 0.6s cubic-bezier(0.16, 1, 0.3, 1);
-        }
-
-        @keyframes slideUp {
-            from { opacity: 0; transform: translateY(20px); }
+        @keyframes fadeDown {
+            from { opacity: 0; transform: translateY(-12px); }
             to { opacity: 1; transform: translateY(0); }
         }
 
-        .status-blob {
-            width: 120px;
-            height: 120px;
-            margin: 0 auto 2rem;
-            position: relative;
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .logo-mark {
+            width: 36px; height: 36px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, var(--accent) 0%, rgba(45,212,191,0.4) 100%);
             display: flex;
             align-items: center;
             justify-content: center;
-        }
-
-        .status-icon {
-            width: 80px;
-            height: 80px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 2.5rem;
-            z-index: 2;
-            transition: all 0.5s ease;
-        }
-
-        .status-ring {
-            position: absolute;
-            width: 100%;
-            height: 100%;
-            border-radius: 50%;
-            border: 2px solid transparent;
-            animation: pulse 2s infinite;
-        }
-
-        @keyframes pulse {
-            0% { transform: scale(0.8); opacity: 1; }
-            100% { transform: scale(1.3); opacity: 0; }
-        }
-
-        /* Connected State */
-        .connected .status-icon {
-            background: rgba(16, 185, 129, 0.2);
-            color: var(--success);
-            box-shadow: 0 0 30px rgba(16, 185, 129, 0.2);
-        }
-        .connected .status-ring { border-color: var(--success); }
-
-        /* Disconnected State */
-        .disconnected .status-icon {
-            background: rgba(239, 68, 68, 0.2);
-            color: var(--error);
-            box-shadow: 0 0 30px rgba(239, 68, 68, 0.2);
-        }
-        .disconnected .status-ring { border-color: var(--error); }
-
-        h1 {
-            font-size: 2rem;
-            font-weight: 600;
-            margin-bottom: 0.5rem;
-            letter-spacing: -0.02em;
-        }
-
-        .subtext {
-            color: var(--text-dim);
-            font-size: 1.1rem;
-            margin-bottom: 2.5rem;
-        }
-
-        .stats {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 1rem;
-            border-top: 1px solid var(--border);
-            padding-top: 2rem;
-        }
-
-        .stat-item {
-            text-align: left;
-            padding: 0.5rem;
-        }
-
-        .stat-label {
-            color: var(--text-dim);
-            font-size: 0.8rem;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            margin-bottom: 0.25rem;
-        }
-
-        .stat-value {
-            font-family: 'JetBrains Mono', monospace;
             font-size: 1rem;
-            color: var(--primary);
+            font-weight: 700;
+            color: #09090b;
+            letter-spacing: -0.04em;
+            box-shadow: 0 0 20px var(--accent-dim), inset 0 1px 0 rgba(255,255,255,0.2);
         }
 
-        .badge {
-            display: inline-block;
-            padding: 0.25rem 0.75rem;
+        .logo-text {
+            font-weight: 600;
+            font-size: 1.05rem;
+            color: var(--text);
+            letter-spacing: -0.01em;
+        }
+
+        .logo-text span {
+            color: var(--text-secondary);
+            font-weight: 400;
+        }
+
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .uptime-chip {
+            font-family: var(--mono);
+            font-size: 0.7rem;
+            color: var(--text-tertiary);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            padding: 0.3rem 0.65rem;
             border-radius: 99px;
+            letter-spacing: 0.02em;
+        }
+
+        .role-chip {
+            font-size: 0.65rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            padding: 0.3rem 0.7rem;
+            border-radius: 99px;
+            background: var(--accent-dim);
+            color: var(--accent);
+            border: 1px solid rgba(45,212,191,0.2);
+        }
+
+        /* ── Connection graph ─────────────────────────────────────── */
+        .graph-section {
+            padding: 1rem 0 2rem;
+            animation: fadeUp 0.8s cubic-bezier(0.16,1,0.3,1) 0.1s both;
+        }
+
+        @keyframes fadeUp {
+            from { opacity: 0; transform: translateY(16px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .graph-canvas {
+            width: 100%;
+            height: 320px;
+            display: block;
+        }
+
+        .graph-label {
+            text-align: center;
+            margin-top: 0.75rem;
+        }
+
+        .graph-title {
+            font-size: 1.4rem;
+            font-weight: 700;
+            letter-spacing: -0.035em;
+            margin-bottom: 0.25rem;
+            transition: color 0.5s ease;
+        }
+
+        .graph-sub {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            font-weight: 400;
+        }
+
+        @keyframes dashFlow {
+            to { stroke-dashoffset: -20; }
+        }
+
+        @keyframes nodeAppear {
+            from { transform: scale(0); opacity: 0; }
+            to { transform: scale(1); opacity: 1; }
+        }
+
+        @keyframes centerPulse {
+            0%, 100% { r: 28; opacity: 0.15; }
+            50% { r: 36; opacity: 0.05; }
+        }
+
+        /* ── Stats row ───────────────────────────────────────────── */
+        .stats-row {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 0.75rem;
+            margin-bottom: 2rem;
+            animation: fadeUp 0.8s cubic-bezier(0.16,1,0.3,1) 0.25s both;
+        }
+
+        .stat-tile {
+            position: relative;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 1.25rem 1rem;
+            overflow: hidden;
+            transition: border-color 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .stat-tile:hover {
+            border-color: var(--border-highlight);
+            box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+        }
+
+        .stat-tile::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--accent-dim), transparent);
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+
+        .stat-tile:hover::before { opacity: 1; }
+
+        .stat-tile-icon {
+            font-size: 1.1rem;
+            margin-bottom: 0.6rem;
+            opacity: 0.7;
+        }
+
+        .stat-tile-value {
+            font-family: var(--mono);
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: var(--text);
+            line-height: 1;
+            margin-bottom: 0.35rem;
+        }
+
+        .stat-tile-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--text-tertiary);
+            font-weight: 500;
+        }
+
+        /* ── Client panel ────────────────────────────────────────── */
+        .panel {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+            animation: fadeUp 0.8s cubic-bezier(0.16,1,0.3,1) 0.4s both;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .panel-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0.9rem 1.25rem;
+            border-bottom: 1px solid var(--border);
+            background: var(--surface-raised);
+        }
+
+        .panel-title {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
             font-size: 0.75rem;
             font-weight: 600;
-            background: var(--primary);
-            color: white;
-            margin-bottom: 1.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--text-secondary);
+        }
+
+        .panel-title-dot {
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: var(--accent);
+            box-shadow: 0 0 8px var(--accent-dim);
+        }
+
+        .panel-count {
+            font-family: var(--mono);
+            font-size: 0.7rem;
+            color: var(--text-tertiary);
+            background: var(--surface);
+            padding: 0.15rem 0.5rem;
+            border-radius: 99px;
+            border: 1px solid var(--border);
+        }
+
+        .panel-body {
+            padding: 0.5rem;
+            overflow-y: auto;
+            max-height: 320px;
+            flex: 1;
+        }
+
+        .panel-body::-webkit-scrollbar { width: 4px; }
+        .panel-body::-webkit-scrollbar-track { background: transparent; }
+        .panel-body::-webkit-scrollbar-thumb { background: var(--border-highlight); border-radius: 99px; }
+
+        .client-empty {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 3rem 1rem;
+            color: var(--text-tertiary);
+            font-size: 0.85rem;
+            gap: 0.5rem;
+        }
+
+        .client-empty-icon {
+            font-size: 2rem;
+            opacity: 0.3;
+        }
+
+        .client-card {
+            display: flex;
+            align-items: flex-start;
+            gap: 0.75rem;
+            padding: 0.85rem 0.9rem;
+            border-radius: var(--radius-sm);
+            transition: background 0.2s ease;
+            cursor: default;
+        }
+
+        .client-card:hover {
+            background: var(--surface-raised);
+        }
+
+        .client-avatar {
+            width: 34px; height: 34px;
+            border-radius: 8px;
+            background: linear-gradient(135deg, var(--accent-dim), var(--amber-dim));
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 0.75rem;
+            color: var(--accent);
+            flex-shrink: 0;
+            border: 1px solid var(--border);
+            overflow: hidden;
+        }
+
+        .client-avatar img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .client-info {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .client-name-row {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.2rem;
+        }
+
+        .client-username {
+            font-weight: 600;
+            font-size: 0.85rem;
+            color: var(--text);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .client-transport {
+            font-family: var(--mono);
+            font-size: 0.55rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            padding: 0.1rem 0.4rem;
+            border-radius: 4px;
+            flex-shrink: 0;
+        }
+
+        .transport-ws {
+            background: var(--accent-dim);
+            color: var(--accent);
+        }
+
+        .transport-http {
+            background: var(--amber-dim);
+            color: var(--amber);
+        }
+
+        .client-place {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .client-id {
+            font-family: var(--mono);
+            font-size: 0.6rem;
+            color: var(--text-tertiary);
+            margin-top: 0.15rem;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        /* ── Footer ──────────────────────────────────────────────── */
+        .footer {
+            text-align: center;
+            padding: 1.5rem 0 0;
+            font-size: 0.7rem;
+            color: var(--text-tertiary);
+            letter-spacing: 0.02em;
+            animation: fadeUp 0.8s cubic-bezier(0.16,1,0.3,1) 0.55s both;
+        }
+
+        .footer a {
+            color: var(--text-tertiary);
+            text-decoration: none;
+            border-bottom: 1px solid var(--border);
+            transition: color 0.2s ease, border-color 0.2s ease;
+        }
+
+        .footer a:hover {
+            color: var(--accent);
+            border-color: var(--accent);
+        }
+
+        /* ── Responsive ──────────────────────────────────────────── */
+        @media (max-width: 520px) {
+            .shell { padding: 1rem 1rem 2rem; }
+            .stats-row { grid-template-columns: 1fr 1fr; }
+            .stats-row .stat-tile:last-child { grid-column: span 2; }
+            .hero-title { font-size: 1.6rem; }
+            .header { flex-wrap: wrap; gap: 0.5rem; }
         }
     </style>
 </head>
 <body>
-    <div class="container" id="app">
-        <div class="card disconnected" id="statusCard">
-            <div class="badge">Roblox MCP Server</div>
-            <div class="status-blob">
-                <div class="status-ring"></div>
-                <div class="status-icon">
-                    <span id="statusEmoji">×</span>
-                </div>
-            </div>
-            <h1 id="statusText">Disconnected</h1>
-            <p class="subtext" id="subText">Waiting for Roblox client...</p>
-            
-            <div class="stats">
-                <div class="stat-item">
-                    <div class="stat-label">Clients</div>
-                    <div class="stat-value" id="clientCount">0</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-label">Role</div>
-                    <div class="stat-value" id="roleValue">—</div>
-                </div>
-                <div class="stat-item">
-                    <div class="stat-label">Relay Clients</div>
-                    <div class="stat-value" id="relayCount">0</div>
-                </div>
-            </div>
+    <!-- Background layers -->
+    <div class="bg-layer bg-gradient"></div>
+    <div class="bg-layer bg-grid"></div>
+    <div class="bg-layer bg-noise"></div>
 
-            <div id="clientList" style="margin-top:12px;text-align:left;font-size:13px;color:#aaa;"></div>
+
+    <div class="shell">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <div class="logo-mark">M</div>
+                <div class="logo-text">Roblox <span>MCP</span></div>
+            </div>
+            <div class="header-right">
+                <div class="uptime-chip" id="uptimeChip">00:00:00</div>
+                <div class="role-chip" id="roleChip">—</div>
+            </div>
+        </header>
+
+        <!-- Connection graph -->
+        <section class="graph-section">
+            <svg class="graph-canvas" id="graphCanvas" viewBox="0 0 720 320"></svg>
+            <div class="graph-label">
+                <h1 class="graph-title" id="graphTitle">Disconnected</h1>
+                <p class="graph-sub" id="graphSub">Waiting for Roblox clients…</p>
+            </div>
+        </section>
+
+        <!-- Stats -->
+        <div class="stats-row">
+            <div class="stat-tile">
+                <div class="stat-tile-icon">◈</div>
+                <div class="stat-tile-value" id="statClients">0</div>
+                <div class="stat-tile-label">Clients</div>
+            </div>
+            <div class="stat-tile">
+                <div class="stat-tile-icon">⟁</div>
+                <div class="stat-tile-value" id="statRelay">0</div>
+                <div class="stat-tile-label">Relay Peers</div>
+            </div>
         </div>
+
+        <!-- Client panel -->
+        <div class="panel">
+            <div class="panel-header">
+                <div class="panel-title">
+                    <div class="panel-title-dot"></div>
+                    Connected Clients
+                </div>
+                <div class="panel-count" id="panelCount">0</div>
+            </div>
+            <div class="panel-body" id="clientList">
+                <div class="client-empty">
+                    <div class="client-empty-icon">◌</div>
+                    No clients connected
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="footer">
+            Roblox MCP Server · Port ${String(WS_PORT)} · <a href="https://github.com/notpoiu/roblox-mcp" target="_blank" rel="noopener">GitHub</a>
+        </footer>
     </div>
 
     <script>
-        const statusCard = document.getElementById('statusCard');
-        const statusText = document.getElementById('statusText');
-        const subText = document.getElementById('subText');
-        const statusEmoji = document.getElementById('statusEmoji');
-        const clientCountValue = document.getElementById('clientCount');
-        const roleValue = document.getElementById('roleValue');
-        const relayCountValue = document.getElementById('relayCount');
-        const clientListDiv = document.getElementById('clientList');
+        const SVG_NS = 'http://www.w3.org/2000/svg';
+        const graphCanvas = document.getElementById('graphCanvas');
+        const graphTitle = document.getElementById('graphTitle');
+        const graphSub = document.getElementById('graphSub');
+        const statClients = document.getElementById('statClients');
+        const statRelay = document.getElementById('statRelay');
+        const roleChip = document.getElementById('roleChip');
+        const panelCount = document.getElementById('panelCount');
+        const clientList = document.getElementById('clientList');
+        const uptimeChip = document.getElementById('uptimeChip');
+
+        const CX = 360, CY = 160;
+        const ORBIT_RX = 200, ORBIT_RY = 110;
+        const NODE_COLORS = ['#2dd4bf','#38bdf8','#a78bfa','#fb923c','#f472b6','#facc15','#4ade80','#f87171'];
+        let prevNodeCount = -1;
+
+        function svgEl(tag, attrs) {
+            const el = document.createElementNS(SVG_NS, tag);
+            for (const k in attrs) el.setAttribute(k, attrs[k]);
+            return el;
+        }
+
+        function renderGraph(clients, relayCount) {
+            const nodes = [];
+            if (clients) {
+                clients.forEach(function(c) {
+                    nodes.push({ label: c.username.slice(0,2).toUpperCase(), name: c.username, type: 'client', userId: c.userId || 0 });
+                });
+            }
+            for (var r = 0; r < (relayCount || 0); r++) {
+                nodes.push({ label: 'R' + (r+1), name: 'Relay ' + (r+1), type: 'relay' });
+            }
+
+            if (nodes.length === prevNodeCount) return;
+            prevNodeCount = nodes.length;
+
+            graphCanvas.innerHTML = '';
+
+            /* defs */
+            const defs = svgEl('defs', {});
+            const glow = svgEl('filter', { id: 'glow', x: '-50%', y: '-50%', width: '200%', height: '200%' });
+            glow.appendChild(svgEl('feGaussianBlur', { stdDeviation: '4', result: 'blur' }));
+            const merge = svgEl('feMerge', {});
+            merge.appendChild(svgEl('feMergeNode', { 'in': 'blur' }));
+            merge.appendChild(svgEl('feMergeNode', { 'in': 'SourceGraphic' }));
+            glow.appendChild(merge);
+            defs.appendChild(glow);
+            graphCanvas.appendChild(defs);
+
+            /* center glow ring */
+            const pulse = svgEl('circle', {
+                cx: CX, cy: CY, r: '32',
+                fill: nodes.length > 0 ? 'rgba(45,212,191,0.1)' : 'rgba(248,113,113,0.08)',
+                stroke: 'none'
+            });
+            pulse.innerHTML = '<animate attributeName="r" values="28;38;28" dur="3s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.15;0.05;0.15" dur="3s" repeatCount="indefinite"/>';
+            graphCanvas.appendChild(pulse);
+
+            /* connecting lines + satellite nodes */
+            var total = nodes.length;
+            var spread = total <= 1 ? 0 : Math.PI * 1.4;
+            var startAngle = total <= 1 ? 0 : -Math.PI / 2 - spread / 2;
+
+            nodes.forEach(function(node, i) {
+                var angle = total === 1 ? -Math.PI/2 : startAngle + (spread / (total - 1)) * i;
+                var nx = CX + Math.cos(angle) * ORBIT_RX;
+                var ny = CY + Math.sin(angle) * ORBIT_RY;
+                var color = NODE_COLORS[i % NODE_COLORS.length];
+
+                /* line (static dashes) */
+                var line = svgEl('line', {
+                    x1: CX, y1: CY, x2: nx, y2: ny,
+                    stroke: color, 'stroke-width': '1.5', 'stroke-opacity': '0.3',
+                    'stroke-dasharray': '6 4'
+                });
+                graphCanvas.appendChild(line);
+
+                /* outbound travelling dot (center -> satellite) */
+                var dotOut = svgEl('circle', { r: '2.5', fill: color, opacity: '0.8' });
+                var motionOut = svgEl('animateMotion', {
+                    dur: (2 + Math.random()).toFixed(1) + 's',
+                    repeatCount: 'indefinite',
+                    path: 'M'+CX+','+CY+' L'+nx+','+ny
+                });
+                dotOut.appendChild(motionOut);
+                graphCanvas.appendChild(dotOut);
+
+                /* inbound travelling dot (satellite -> center) */
+                var dotIn = svgEl('circle', { r: '2.5', fill: color, opacity: '0.6' });
+                var motionIn = svgEl('animateMotion', {
+                    dur: (2.5 + Math.random()).toFixed(1) + 's',
+                    repeatCount: 'indefinite',
+                    path: 'M'+nx+','+ny+' L'+CX+','+CY
+                });
+                dotIn.appendChild(motionIn);
+                graphCanvas.appendChild(dotIn);
+
+                /* satellite node group */
+                var g = svgEl('g', {
+                    style: 'animation: nodeAppear 0.5s cubic-bezier(0.16,1,0.3,1) ' + (i * 0.08).toFixed(2) + 's both; transform-origin: '+nx+'px '+ny+'px'
+                });
+
+                /* outer ring */
+                g.appendChild(svgEl('circle', {
+                    cx: nx, cy: ny, r: '24',
+                    fill: 'none', stroke: color, 'stroke-width': '1', 'stroke-opacity': '0.2'
+                }));
+
+                /* filled circle */
+                g.appendChild(svgEl('circle', {
+                    cx: nx, cy: ny, r: '18',
+                    fill: '#09090b', stroke: color, 'stroke-width': '1.5', 'stroke-opacity': '0.6'
+                }));
+
+                /* avatar image or label */
+                if (node.userId && node.userId > 0) {
+                    /* clip path for circular avatar */
+                    var clipId = 'avatarClip' + i;
+                    var clip = svgEl('clipPath', { id: clipId });
+                    clip.appendChild(svgEl('circle', { cx: nx, cy: ny, r: '15' }));
+                    defs.appendChild(clip);
+
+                    var img = svgEl('image', {
+                        x: nx - 15, y: ny - 15, width: '30', height: '30',
+                        href: '/api/avatar?userId=' + node.userId,
+                        'clip-path': 'url(#' + clipId + ')',
+                        preserveAspectRatio: 'xMidYMid slice'
+                    });
+                    g.appendChild(img);
+                } else {
+                    /* text label fallback */
+                    var txt = svgEl('text', {
+                        x: nx, y: ny, 'text-anchor': 'middle', 'dominant-baseline': 'central',
+                        fill: color, 'font-family': 'IBM Plex Mono, monospace',
+                        'font-size': '10', 'font-weight': '600', 'letter-spacing': '0.05em'
+                    });
+                    txt.textContent = node.label;
+                    g.appendChild(txt);
+                }
+
+                /* name below */
+                var nameTxt = svgEl('text', {
+                    x: nx, y: ny + 30, 'text-anchor': 'middle',
+                    fill: '#a1a1aa', 'font-family': 'Instrument Sans, sans-serif',
+                    'font-size': '9', 'font-weight': '500'
+                });
+                nameTxt.textContent = node.name;
+                g.appendChild(nameTxt);
+
+                graphCanvas.appendChild(g);
+            });
+
+            /* center node (on top) */
+            var cg = svgEl('g', { filter: 'url(#glow)' });
+            var centerColor = nodes.length > 0 ? '#2dd4bf' : '#f87171';
+
+            cg.appendChild(svgEl('circle', {
+                cx: CX, cy: CY, r: '26',
+                fill: '#09090b', stroke: centerColor, 'stroke-width': '2'
+            }));
+
+            var mTxt = svgEl('text', {
+                x: CX, y: CY, 'text-anchor': 'middle', 'dominant-baseline': 'central',
+                fill: centerColor, 'font-family': 'Instrument Sans, sans-serif',
+                'font-size': '13', 'font-weight': '700'
+            });
+            mTxt.textContent = 'MCP';
+            cg.appendChild(mTxt);
+            graphCanvas.appendChild(cg);
+        }
+
+        /* initial idle state */
+        renderGraph([], 0);
+
+        const startTime = Date.now();
+
+        function updateUptime() {
+            const elapsed = Math.floor((Date.now() - startTime) / 1000);
+            const h = String(Math.floor(elapsed / 3600)).padStart(2, '0');
+            const m = String(Math.floor((elapsed % 3600) / 60)).padStart(2, '0');
+            const s = String(elapsed % 60).padStart(2, '0');
+            uptimeChip.textContent = h + ':' + m + ':' + s;
+        }
+
+        setInterval(updateUptime, 1000);
+
+        function getInitials(name) {
+            return name.slice(0, 2).toUpperCase();
+        }
+
+        function renderClients(clients) {
+            if (!clients || clients.length === 0) {
+                clientList.innerHTML = '<div class="client-empty"><div class="client-empty-icon">◌</div>No clients connected</div>';
+                return;
+            }
+
+            clientList.innerHTML = clients.map(function(c) {
+                var transportClass = c.transport === 'ws' ? 'transport-ws' : 'transport-http';
+                var avatarContent = '';
+                if (c.userId && c.userId > 0) {
+                    avatarContent = '<img src="/api/avatar?userId=' + c.userId + '" data-initials="' + getInitials(c.username) + '" />';
+                } else {
+                    avatarContent = getInitials(c.username);
+                }
+                return '<div class="client-card">' +
+                    '<div class="client-avatar">' + avatarContent + '</div>' +
+                    '<div class="client-info">' +
+                        '<div class="client-name-row">' +
+                            '<span class="client-username">' + c.username + '</span>' +
+                            '<span class="client-transport ' + transportClass + '">' + c.transport.toUpperCase() + '</span>' +
+                        '</div>' +
+                        '<div class="client-place">' + c.placeName + '</div>' +
+                        '<div class="client-id">' + c.clientId + '</div>' +
+                    '</div>' +
+                '</div>';
+            }).join('');
+
+            /* attach onerror fallback to avatar images */
+            clientList.querySelectorAll('.client-avatar img').forEach(function(img) {
+                img.onerror = function() {
+                    var initials = img.getAttribute('data-initials') || '??';
+                    img.parentNode.textContent = initials;
+                };
+            });
+        }
 
         async function updateStatus() {
             try {
@@ -267,35 +833,28 @@ const STATUS_PAGE_HTML = `
                 const data = await res.json();
 
                 if (data.connected) {
-                    statusCard.className = 'card connected';
-                    statusText.innerText = 'Connected';
-                    subText.innerText = '';
-                    statusEmoji.innerText = '✓';
+                    graphTitle.textContent = 'Connected';
+                    graphTitle.style.color = 'var(--success)';
+                    graphSub.textContent = data.clientCount + ' client' + (data.clientCount !== 1 ? 's' : '') + ' active';
                 } else {
-                    statusCard.className = 'card disconnected';
-                    statusText.innerText = 'Disconnected';
-                    statusEmoji.innerText = '×';
+                    graphTitle.textContent = 'Disconnected';
+                    graphTitle.style.color = 'var(--error)';
+                    graphSub.textContent = 'Waiting for Roblox clients\u2026';
                 }
 
-                clientCountValue.innerText = data.clientCount;
-                roleValue.innerText = data.role;
-                relayCountValue.innerText = data.relayClients;
+                renderGraph(data.clients || [], data.relayClients || 0);
 
-                if (data.clients && data.clients.length > 0) {
-                    clientListDiv.innerHTML = data.clients.map(c =>
-                        '<div style="padding:4px 0;border-bottom:1px solid #333;">' +
-                        '<strong>' + c.username + '</strong> — ' + c.placeName +
-                        ' <span style="opacity:0.5">(' + c.transport.toUpperCase() + ')</span>' +
-                        '<br><span style="font-size:11px;opacity:0.5">' + c.clientId + '</span>' +
-                        '</div>'
-                    ).join('');
-                } else {
-                    clientListDiv.innerHTML = '';
-                }
+                statClients.textContent = data.clientCount;
+                statRelay.textContent = data.relayClients;
+                roleChip.textContent = data.role;
+                panelCount.textContent = data.clientCount;
+
+                renderClients(data.clients);
             } catch (e) {
-                statusCard.className = 'card disconnected';
-                statusText.innerText = 'Offline';
-                statusEmoji.innerText = '!';
+                graphTitle.textContent = 'Offline';
+                graphTitle.style.color = 'var(--error)';
+                graphSub.textContent = 'Cannot reach server';
+                renderGraph([], 0);
             }
         }
 
@@ -327,6 +886,7 @@ const NO_CLIENT_ERROR = {
 
 function registerClient(info: {
   username: string;
+  userId: number;
   placeId: number;
   jobId: string;
   placeName: string;
@@ -337,6 +897,7 @@ function registerClient(info: {
   const entry: RobloxClient = {
     clientId,
     username: info.username,
+    userId: info.userId,
     placeId: info.placeId,
     jobId: info.jobId,
     placeName: info.placeName,
@@ -513,7 +1074,7 @@ function startAsPrimary(): Promise<void> {
     relayRequestOrigin = new Map();
 
     httpServer = createServer(
-      (req: IncomingMessage, res: ServerResponse) => {
+      async (req: IncomingMessage, res: ServerResponse) => {
         const url = new URL(req.url || "/", `http://localhost:${WS_PORT}`);
 
         // ── Root status page ──
@@ -536,6 +1097,7 @@ function startAsPrimary(): Promise<void> {
               clients: active.map((c) => ({
                 clientId: c.clientId,
                 username: c.username,
+                userId: c.userId,
                 placeId: c.placeId,
                 jobId: c.jobId,
                 placeName: c.placeName,
@@ -543,6 +1105,35 @@ function startAsPrimary(): Promise<void> {
               })),
             })
           );
+          return;
+        }
+
+        // ── Avatar thumbnail proxy ──
+        if (url.pathname === "/api/avatar" && req.method === "GET") {
+          const userId = url.searchParams.get("userId");
+          if (!userId) {
+            res.writeHead(400);
+            res.end("Missing userId");
+            return;
+          }
+
+          try {
+            const robloxRes = await fetch(
+              `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${encodeURIComponent(userId)}&size=150x150&format=Png&isCircular=false`
+            );
+            const json = await robloxRes.json() as { data?: { imageUrl?: string }[] };
+            const imageUrl = json.data?.[0]?.imageUrl;
+            if (imageUrl) {
+              res.writeHead(302, { Location: imageUrl, "Cache-Control": "public, max-age=300" });
+              res.end();
+            } else {
+              res.writeHead(404);
+              res.end("No thumbnail found");
+            }
+          } catch {
+            res.writeHead(502);
+            res.end("Failed to fetch thumbnail");
+          }
           return;
         }
 
@@ -555,6 +1146,7 @@ function startAsPrimary(): Promise<void> {
               const info = JSON.parse(body);
               const clientId = registerClient({
                 username: info.username || "Unknown",
+                userId: info.userId || 0,
                 placeId: info.placeId || 0,
                 jobId: info.jobId || "",
                 placeName: info.placeName || "Unknown",
@@ -720,6 +1312,7 @@ function startAsPrimary(): Promise<void> {
             if (data.type === "register") {
               const clientId = registerClient({
                 username: data.username || "Unknown",
+                userId: data.userId || 0,
                 placeId: data.placeId || 0,
                 jobId: data.jobId || "",
                 placeName: data.placeName || "Unknown",
