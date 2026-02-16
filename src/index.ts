@@ -1424,6 +1424,282 @@ server.registerTool(
   }
 );
 
+server.registerTool(
+  "ensure-remote-spy",
+  {
+    title: "Ensure the Cobalt remote spy is loaded",
+    description:
+      "Loads the Cobalt remote spy if it is not already running. Cobalt hooks all RemoteEvents, RemoteFunctions, BindableEvents, BindableFunctions (both incoming and outgoing, including Actors) and logs their calls. Must be called before using get-remote-spy-logs. Returns the current status of Cobalt.",
+    inputSchema: z.object({
+      clientId: clientIdSchema,
+    }),
+  },
+  async ({ clientId }) => {
+    const toolCallId = SendArbitraryDataToClient(
+      "ensure-remote-spy",
+      {},
+      undefined,
+      clientId
+    );
+
+    if (toolCallId === null) {
+      return NO_CLIENT_ERROR;
+    }
+
+    const response = (await GetResponseOfIdFromClient(toolCallId)) as
+      | {
+          output: string;
+        }
+      | undefined;
+
+    if (response === undefined || response.output === undefined) {
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              "Failed to ensure remote spy. Response: " +
+              JSON.stringify(response),
+          },
+        ],
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: response.output,
+        },
+      ],
+    };
+  }
+);
+
+server.registerTool(
+  "get-remote-spy-logs",
+  {
+    title: "Get captured remote spy logs from Cobalt",
+    description:
+      'Retrieves captured remote/bindable call logs from the Cobalt remote spy. Returns remote name, class, direction (Incoming/Outgoing), call count, and recent call arguments. Cobalt must be loaded first via ensure-remote-spy.',
+    inputSchema: z.object({
+      direction: z
+        .enum(["Incoming", "Outgoing", "Both"])
+        .describe("Filter by call direction (default: Both)")
+        .optional()
+        .default("Both"),
+      remoteNameFilter: z
+        .string()
+        .describe(
+          "Optional filter — only return logs for remotes whose name contains this string (case-insensitive)"
+        )
+        .optional(),
+      limit: z
+        .number()
+        .describe(
+          "Maximum number of remote logs to return (default: 50)"
+        )
+        .optional()
+        .default(50),
+      maxCallsPerRemote: z
+        .number()
+        .describe(
+          "Maximum number of recent calls to return per remote (default: 5)"
+        )
+        .optional()
+        .default(5),
+      clientId: clientIdSchema,
+    }),
+  },
+  async ({ direction, remoteNameFilter, limit, maxCallsPerRemote, clientId }) => {
+    const toolCallId = SendArbitraryDataToClient(
+      "get-remote-spy-logs",
+      {
+        direction,
+        remoteNameFilter: remoteNameFilter || "",
+        limit,
+        maxCallsPerRemote,
+      },
+      undefined,
+      clientId
+    );
+
+    if (toolCallId === null) {
+      return NO_CLIENT_ERROR;
+    }
+
+    const response = (await GetResponseOfIdFromClient(toolCallId)) as
+      | {
+          output: string;
+        }
+      | undefined;
+
+    if (response === undefined || response.output === undefined) {
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              "Failed to get remote spy logs. Response: " +
+              JSON.stringify(response),
+          },
+        ],
+      };
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: response.output,
+        },
+      ],
+    };
+  }
+);
+
+server.registerTool(
+  "clear-remote-spy-logs",
+  {
+    title: "Clear all remote spy logs",
+    description:
+      "Clears all captured remote spy logs from Cobalt. This removes all logged calls for every remote. Cobalt must be loaded first via ensure-remote-spy.",
+    inputSchema: z.object({
+      clientId: clientIdSchema,
+    }),
+  },
+  async ({ clientId }) => {
+    const toolCallId = SendArbitraryDataToClient(
+      "clear-remote-spy-logs",
+      {},
+      undefined,
+      clientId
+    );
+
+    if (toolCallId === null) {
+      return NO_CLIENT_ERROR;
+    }
+
+    const response = (await GetResponseOfIdFromClient(toolCallId)) as
+      | { output: string }
+      | undefined;
+
+    if (response === undefined || response.output === undefined) {
+      return {
+        content: [
+          { type: "text", text: "Failed to clear remote spy logs. Response: " + JSON.stringify(response) },
+        ],
+      };
+    }
+
+    return {
+      content: [{ type: "text", text: response.output }],
+    };
+  }
+);
+
+server.registerTool(
+  "block-remote",
+  {
+    title: "Block or unblock a remote",
+    description:
+      "Block or unblock a specific remote event/function in the Cobalt remote spy. Blocked remotes will have their calls prevented from reaching the server/client. Cobalt must be loaded first via ensure-remote-spy.",
+    inputSchema: z.object({
+      remoteName: z
+        .string()
+        .describe("The exact name of the remote to block/unblock"),
+      direction: z
+        .enum(["Incoming", "Outgoing"])
+        .describe("Whether the remote is Incoming or Outgoing"),
+      shouldBlock: z
+        .boolean()
+        .describe("true to block, false to unblock")
+        .optional()
+        .default(true),
+      clientId: clientIdSchema,
+    }),
+  },
+  async ({ remoteName, direction, shouldBlock, clientId }) => {
+    const toolCallId = SendArbitraryDataToClient(
+      "block-remote",
+      { remoteName, direction, shouldBlock },
+      undefined,
+      clientId
+    );
+
+    if (toolCallId === null) {
+      return NO_CLIENT_ERROR;
+    }
+
+    const response = (await GetResponseOfIdFromClient(toolCallId)) as
+      | { output: string }
+      | undefined;
+
+    if (response === undefined || response.output === undefined) {
+      return {
+        content: [
+          { type: "text", text: "Failed to block/unblock remote. Response: " + JSON.stringify(response) },
+        ],
+      };
+    }
+
+    return {
+      content: [{ type: "text", text: response.output }],
+    };
+  }
+);
+
+server.registerTool(
+  "ignore-remote",
+  {
+    title: "Ignore or unignore a remote",
+    description:
+      "Ignore or unignore a specific remote event/function in the Cobalt remote spy. Ignored remotes will still fire but their calls won't be logged. Cobalt must be loaded first via ensure-remote-spy.",
+    inputSchema: z.object({
+      remoteName: z
+        .string()
+        .describe("The exact name of the remote to ignore/unignore"),
+      direction: z
+        .enum(["Incoming", "Outgoing"])
+        .describe("Whether the remote is Incoming or Outgoing"),
+      shouldIgnore: z
+        .boolean()
+        .describe("true to ignore, false to unignore")
+        .optional()
+        .default(true),
+      clientId: clientIdSchema,
+    }),
+  },
+  async ({ remoteName, direction, shouldIgnore, clientId }) => {
+    const toolCallId = SendArbitraryDataToClient(
+      "ignore-remote",
+      { remoteName, direction, shouldIgnore },
+      undefined,
+      clientId
+    );
+
+    if (toolCallId === null) {
+      return NO_CLIENT_ERROR;
+    }
+
+    const response = (await GetResponseOfIdFromClient(toolCallId)) as
+      | { output: string }
+      | undefined;
+
+    if (response === undefined || response.output === undefined) {
+      return {
+        content: [
+          { type: "text", text: "Failed to ignore/unignore remote. Response: " + JSON.stringify(response) },
+        ],
+      };
+    }
+
+    return {
+      content: [{ type: "text", text: response.output }],
+    };
+  }
+);
+
 // ─── Start everything ───────────────────────────────────────────────────────────
 
 const transport = new StdioServerTransport();

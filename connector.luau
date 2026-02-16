@@ -677,6 +677,216 @@ while true do
         return buildTree(rootInstance, 0)
     end)
 
+    Bridge:BindToType("ensure-remote-spy", function(data)
+        if getgenv().Cobalt then
+            return {
+                status = "already_loaded",
+                message = "Cobalt remote spy is already running."
+            }
+        end
+
+        -- Load Cobalt
+        local success, err = pcall(function()
+            loadstring(game:HttpGet("https://github.com/notpoiu/cobalt/releases/latest/download/Cobalt.luau"))()
+        end)
+
+        if not success then
+            error("Failed to load Cobalt: " .. tostring(err))
+        end
+
+        -- Wait for Cobalt to initialize
+        local waitStart = os.clock()
+        while not getgenv().Cobalt and os.clock() - waitStart < 10 do
+            task.wait(0.1)
+        end
+        
+        return {
+            status = "loaded",
+            message = "Cobalt remote spy loaded successfully."
+        }
+    end)
+
+    Bridge:BindToType("get-remote-spy-logs", function(data)
+        local Cobalt = getgenv().Cobalt
+        assert(Cobalt and Cobalt.shared and Cobalt.shared.Logs, "Cobalt remote spy is not loaded. Call ensure-remote-spy first.")
+
+        local direction = data.direction or "Both"
+        local nameFilter = data.remoteNameFilter or ""
+        local limit = data.limit or 50
+        local maxCallsPerRemote = data.maxCallsPerRemote or 5
+        local hasNameFilter = nameFilter ~= ""
+
+        local function ProcessLogs(logTable, directionLabel)
+            local results = {}
+
+            for instance, log in logTable do
+                if typeof(instance) ~= "Instance" then continue end
+                if #results >= limit then break end
+
+                local remoteName = ""
+                local remoteClass = ""
+                pcall(function()
+                    remoteName = instance.Name
+                    remoteClass = instance.ClassName
+                end)
+
+                -- Apply name filter
+                if hasNameFilter and not string.find(string.lower(remoteName), string.lower(nameFilter), 1, true) then
+                    continue
+                end
+
+                -- Get recent calls (raw — LuaEncode handles serialization)
+                local recentCalls = {}
+                local totalCalls = #log.Calls
+                local startIdx = math.max(1, totalCalls - maxCallsPerRemote + 1)
+
+                for i = startIdx, totalCalls do
+                    local call = log.Calls[i]
+                    if not call then continue end
+
+                    table.insert(recentCalls, {
+                        Index = i,
+                        Arguments = call.Arguments,
+                        Origin = call.Origin,
+                        IsExecutor = call.IsExecutor or false,
+                        IsActor = call.IsActor or false,
+                        Line = call.Line,
+                    })
+                end
+
+                table.insert(results, {
+                    RemoteName = remoteName,
+                    RemoteClass = remoteClass,
+                    Direction = directionLabel,
+                    Method = log.Method,
+                    TotalCalls = totalCalls,
+                    Ignored = log.Ignored,
+                    Blocked = log.Blocked,
+                    RecentCalls = recentCalls,
+                })
+            end
+
+            return results
+        end
+
+        local allResults = {}
+
+        if direction == "Outgoing" or direction == "Both" then
+            local outgoing = ProcessLogs(Cobalt.shared.Logs.Outgoing, "Outgoing")
+            for _, r in outgoing do
+                table.insert(allResults, r)
+            end
+        end
+
+        if direction == "Incoming" or direction == "Both" then
+            local incoming = ProcessLogs(Cobalt.shared.Logs.Incoming, "Incoming")
+            for _, r in incoming do
+                table.insert(allResults, r)
+            end
+        end
+
+        -- Sort by total calls descending (most active remotes first)
+        table.sort(allResults, function(a, b)
+            return a.TotalCalls > b.TotalCalls
+        end)
+
+        -- Trim to limit
+        if #allResults > limit then
+            local trimmed = {}
+            for i = 1, limit do
+                trimmed[i] = allResults[i]
+            end
+            allResults = trimmed
+        end
+
+        return {
+            count = #allResults,
+            results = allResults
+        }
+    end)
+
+    Bridge:BindToType("clear-remote-spy-logs", function(data)
+        local Cobalt = getgenv().Cobalt
+        assert(Cobalt and Cobalt.shared and Cobalt.shared.ClearLogs, "Cobalt remote spy is not loaded. Call ensure-remote-spy first.")
+
+        Cobalt.shared.ClearLogs()
+
+        return {
+            status = "cleared",
+            message = "All remote spy logs have been cleared."
+        }
+    end)
+
+    Bridge:BindToType("block-remote", function(data)
+        local Cobalt = getgenv().Cobalt
+        assert(Cobalt and Cobalt.shared and Cobalt.shared.Logs, "Cobalt remote spy is not loaded. Call ensure-remote-spy first.")
+
+        local remoteName = data.remoteName
+        local direction = data.direction
+        local shouldBlock = data.shouldBlock
+
+        local logTable = Cobalt.shared.Logs[direction]
+        assert(logTable, "Invalid direction: " .. tostring(direction))
+
+        for instance, log in logTable do
+            if typeof(instance) ~= "Instance" then continue end
+
+            local name = ""
+            pcall(function() name = instance.Name end)
+
+            if name == remoteName then
+                if shouldBlock and not log.Blocked then
+                    log:Block()
+                elseif not shouldBlock and log.Blocked then
+                    log:Block() -- toggles
+                end
+
+                return {
+                    status = "success",
+                    message = (shouldBlock and "Blocked" or "Unblocked") .. " remote: " .. remoteName,
+                    blocked = log.Blocked
+                }
+            end
+        end
+
+        error("Remote not found: " .. remoteName .. " in " .. direction .. " logs. Make sure the remote has been logged at least once.")
+    end)
+
+    Bridge:BindToType("ignore-remote", function(data)
+        local Cobalt = getgenv().Cobalt
+        assert(Cobalt and Cobalt.shared and Cobalt.shared.Logs, "Cobalt remote spy is not loaded. Call ensure-remote-spy first.")
+
+        local remoteName = data.remoteName
+        local direction = data.direction
+        local shouldIgnore = data.shouldIgnore
+
+        local logTable = Cobalt.shared.Logs[direction]
+        assert(logTable, "Invalid direction: " .. tostring(direction))
+
+        for instance, log in logTable do
+            if typeof(instance) ~= "Instance" then continue end
+
+            local name = ""
+            pcall(function() name = instance.Name end)
+
+            if name == remoteName then
+                if shouldIgnore and not log.Ignored then
+                    log:Ignore()
+                elseif not shouldIgnore and log.Ignored then
+                    log:Ignore() -- toggles
+                end
+
+                return {
+                    status = "success",
+                    message = (shouldIgnore and "Ignoring" or "Unignored") .. " remote: " .. remoteName,
+                    ignored = log.Ignored
+                }
+            end
+        end
+
+        error("Remote not found: " .. remoteName .. " in " .. direction .. " logs. Make sure the remote has been logged at least once.")
+    end)
+
     Bridge:BindToType("search-scripts-sources", function(data)
         assert(ScriptSourcesMap.HasFinishedMapping, "The bridge is still mapping all script sources (" .. tostring(MappedSources) .. "/" .. tostring(SourcesToMap) .. ") please try again later.")
 
