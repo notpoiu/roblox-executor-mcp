@@ -11,6 +11,7 @@ import crypto from "crypto";
 const WS_PORT = 16384;
 const HTTP_POLL_TIMEOUT = 10000; // 10 seconds
 const PROMOTION_JITTER_MAX = 300; // ms
+const TOOL_RESPONSE_TIMEOUT = 15000; // 15 seconds
 
 // ─── Instance role ──────────────────────────────────────────────────────────────
 let instanceRole: "primary" | "secondary" = "primary";
@@ -379,6 +380,24 @@ function getActiveClients(): RobloxClient[] {
   return active;
 }
 
+function formatActiveClientListForTool(): string {
+  const active = getActiveClients();
+  if (active.length === 0) {
+    return "No Roblox clients are currently connected.";
+  }
+
+  const clientList = active.map((c) => ({
+    clientId: c.clientId,
+    username: c.username,
+    placeId: c.placeId,
+    jobId: c.jobId,
+    placeName: c.placeName,
+    transport: c.transport,
+  }));
+
+  return JSON.stringify(clientList, null, 2);
+}
+
 /** Resolve a target client by clientId, or pick the most recently active one. */
 function resolveTargetClient(clientId?: string): RobloxClient | null {
   if (clientId) {
@@ -415,13 +434,40 @@ function SendToClient(target: RobloxClient, message: string) {
   }
 }
 
-function GetResponseOfIdFromClient(id: string): Promise<any> {
+function GetResponseOfIdFromClient(
+  id: string,
+  timeoutMs: number = TOOL_RESPONSE_TIMEOUT
+): Promise<any> {
   return new Promise((resolve) => {
+    let settled = false;
+    let timeout: NodeJS.Timeout;
+
+    const resolveOnce = (data: any) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve(data);
+    };
+
+    timeout = setTimeout(() => {
+      if (instanceRole === "secondary") {
+        secondaryResponseResolvers.delete(id);
+      } else {
+        httpResponseResolvers.delete(id);
+      }
+
+      resolveOnce({
+        id,
+        output: undefined,
+        error: `Timed out waiting for response after ${timeoutMs}ms.`,
+      });
+    }, timeoutMs);
+
     if (instanceRole === "secondary") {
-      secondaryResponseResolvers.set(id, resolve);
+      secondaryResponseResolvers.set(id, resolveOnce);
       return;
     }
-    httpResponseResolvers.set(id, resolve);
+    httpResponseResolvers.set(id, resolveOnce);
   });
 }
 
@@ -605,6 +651,17 @@ function startAsPrimary(): Promise<void> {
             try {
               const message = JSON.parse(rawData.toString());
 
+              // Relay-level request handled directly by the primary.
+              if (message.type === "list-clients" && message.id) {
+                ws.send(
+                  JSON.stringify({
+                    id: message.id,
+                    output: formatActiveClientListForTool(),
+                  })
+                );
+                return;
+              }
+
               if (message.id) {
                 relayRequestOrigin.set(message.id, ws);
               }
@@ -619,6 +676,15 @@ function startAsPrimary(): Promise<void> {
               if (target) {
                 requestToClientId.set(message.id, target.clientId);
                 SendToClient(target, JSON.stringify(message));
+              } else if (message.id) {
+                relayRequestOrigin.delete(message.id);
+                ws.send(
+                  JSON.stringify({
+                    id: message.id,
+                    output: undefined,
+                    error: "No active Roblox client connected.",
+                  })
+                );
               }
             } catch (e) {
               console.error("[Primary] Error parsing relay message:", e);
@@ -818,7 +884,7 @@ server.registerTool(
           content: [
             {
               type: "text",
-              text: response?.output ?? "Failed to list clients.",
+              text: response?.output ?? response?.error ?? "Failed to list clients.",
             },
           ],
         };
@@ -826,32 +892,11 @@ server.registerTool(
       return NO_CLIENT_ERROR;
     }
 
-    const active = getActiveClients();
-    if (active.length === 0) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: "No Roblox clients are currently connected.",
-          },
-        ],
-      };
-    }
-
-    const clientList = active.map((c) => ({
-      clientId: c.clientId,
-      username: c.username,
-      placeId: c.placeId,
-      jobId: c.jobId,
-      placeName: c.placeName,
-      transport: c.transport,
-    }));
-
     return {
       content: [
         {
           type: "text",
-          text: JSON.stringify(clientList, null, 2),
+          text: formatActiveClientListForTool(),
         },
       ],
     };
