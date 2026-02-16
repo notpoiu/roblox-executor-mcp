@@ -11,7 +11,7 @@ A Model Context Protocol (MCP) server that provides full control and introspecti
 - **Instance Searching**: Utilizes `QueryDescendants` to find parts, models, or any object in the game tree.
 - **Remote Spy**: Integrates with [Cobalt](https://github.com/notpoiu/cobalt) to intercept, log, block, and ignore RemoteEvents, RemoteFunctions, BindableEvents, and BindableFunctions.
 - **Primary / Secondary Architecture**: Multiple MCP server instances can run simultaneously. The first instance becomes the **primary** (owns the HTTP/WebSocket bridge), while subsequent instances automatically connect as **secondaries** via a relay. If the primary goes down, a secondary is promoted automatically.
-- **Multi-Instance / Multi-Executor Support**: Connect multiple Roblox clients (different games, accounts, or executors) at the same time. Each client is registered with a unique `clientId` and can be targeted individually through any tool. Use `list-clients` to discover all connected clients. A built-in dashboard UI provides a live overview of every connected client.
+- **Multi-Instance / Multi-Executor Support**: Connect multiple Roblox clients (different games, accounts, or executors) at the same time. Each client is registered with a unique `clientId` and can be targeted individually through any tool. Use `list-clients` to discover all connected clients. A built-in dashboard UI provides a live overview of every connected client (http://localhost:16384/).
 
 ## Prerequisites
 
