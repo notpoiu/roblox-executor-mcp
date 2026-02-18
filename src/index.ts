@@ -7,6 +7,7 @@ import { execSync } from "child_process";
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import { z } from "zod";
 import crypto from "crypto";
+import fs from "fs";
 
 const WS_PORT = 16384;
 const HTTP_POLL_TIMEOUT = 10000; // 10 seconds
@@ -1532,6 +1533,62 @@ server.registerTool(
         {
           type: "text",
           text: `Code has been scheduled to be run in thread context ${threadContext}.`,
+        },
+      ],
+    };
+  }
+);
+
+server.registerTool(
+  "execute-file",
+  {
+    title: "Execute a Luau file in the Roblox Game Client",
+    description:
+      "Reads a local .luau or .lua file from disk and executes its contents in the Roblox Game Client. This tool does NOT return output - use get-data-by-code if you need to retrieve data.",
+    inputSchema: z.object({
+      filePath: z
+        .string()
+        .describe(
+          "The absolute path to the .luau or .lua file to execute"
+        ),
+      threadContext: z
+        .number()
+        .describe(
+          "The thread identity to execute the code in (default: 8, normal game scripts run on 2)"
+        )
+        .optional()
+        .default(8),
+      clientId: clientIdSchema,
+    }),
+  },
+  async ({ filePath, threadContext, clientId }) => {
+    if (!fs.existsSync(filePath)) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `File not found: ${filePath}`,
+          },
+        ],
+      };
+    }
+
+    const code = fs.readFileSync(filePath, "utf-8");
+    console.error(`Executing file ${filePath} in thread ${threadContext}...`);
+
+    const result = SendArbitraryDataToClient("execute", {
+      source: `setthreadidentity(${threadContext})\n${code}`,
+    }, undefined, clientId);
+
+    if (result === null) {
+      return NO_CLIENT_ERROR;
+    }
+
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `File executed: ${filePath} (thread context ${threadContext})`,
         },
       ],
     };
