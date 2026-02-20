@@ -881,6 +881,17 @@ const NO_CLIENT_ERROR = {
       text: "No Roblox client connected to the MCP server. Please notify the user that they have to run the connector.luau script in order to connect the MCP server to their game.",
     },
   ],
+  isError: true,
+};
+
+const INVALID_CLIENT_ERROR = {
+  content: [
+    {
+      type: "text" as const,
+      text: "Invalid client ID provided. Please use the get-clients tool to get a list of valid client IDs.",
+    },
+  ],
+  isError: true,
 };
 
 // ─── Client registry helpers ────────────────────────────────────────────────────
@@ -980,14 +991,6 @@ function resolveTargetClient(clientId?: string): RobloxClient | null {
 }
 
 // ─── Abstraction layer — these work in both primary & secondary mode ────────────
-
-function hasConnectedClients(): boolean {
-  if (instanceRole === "secondary") {
-    return relaySocket !== null && relaySocket.readyState === WebSocket.OPEN;
-  }
-  return getActiveClients().length > 0;
-}
-
 function SendToClient(target: RobloxClient, message: string) {
   if (target.transport === "ws" && target.ws && target.ws.readyState === WebSocket.OPEN) {
     target.ws.send(message);
@@ -1048,14 +1051,31 @@ function SendArbitraryDataToClient(
     return id;
   }
 
-  const target = resolveTargetClient(clientId);
-  if (!target) return null;
+  if (clientId !== undefined) {
+    const target = resolveTargetClient(clientId);
+    if (!target) return "INVALID_CLIENT";
+
+    if (id === undefined) id = crypto.randomUUID();
+
+    const message = { id, ...data, type };
+    requestToClientId.set(id, target.clientId);
+    SendToClient(target, JSON.stringify(message));
+
+    return id;
+  }
+
+  // If clientId is undefined, replicate to all active clients
+  const activeClients = getActiveClients();
+  if (activeClients.length === 0) return null;
 
   if (id === undefined) id = crypto.randomUUID();
-
   const message = { id, ...data, type };
-  requestToClientId.set(id, target.clientId);
-  SendToClient(target, JSON.stringify(message));
+
+  for (const target of activeClients) {
+    // We only track the last one for routing, but the primary broadcasts to all
+    requestToClientId.set(id, target.clientId);
+    SendToClient(target, JSON.stringify(message));
+  }
 
   return id;
 }
@@ -1526,6 +1546,8 @@ server.registerTool(
 
     if (result === null) {
       return NO_CLIENT_ERROR;
+    } else if (result === "INVALID_CLIENT") {
+      return INVALID_CLIENT_ERROR;
     }
 
     return {
@@ -1582,6 +1604,8 @@ server.registerTool(
 
     if (result === null) {
       return NO_CLIENT_ERROR;
+    } else if (result === "INVALID_CLIENT") {
+      return INVALID_CLIENT_ERROR;
     }
 
     return {
@@ -1646,6 +1670,8 @@ server.registerTool(
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;
+    } else if (toolCallId === "INVALID_CLIENT") {
+      return INVALID_CLIENT_ERROR;
     }
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
@@ -1705,6 +1731,8 @@ server.registerTool(
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;
+    } else if (toolCallId === "INVALID_CLIENT") {
+      return INVALID_CLIENT_ERROR;
     }
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
@@ -1767,6 +1795,8 @@ server.registerTool(
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;
+    } else if (toolCallId === "INVALID_CLIENT") {
+      return INVALID_CLIENT_ERROR;
     }
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
@@ -1848,6 +1878,8 @@ COMBINING SELECTORS: Chain selectors for AND logic. Example: Part.Tagged[Anchore
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;
+    } else if (toolCallId === "INVALID_CLIENT") {
+      return INVALID_CLIENT_ERROR;
     }
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
@@ -1924,6 +1956,8 @@ server.registerTool(
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;
+    } else if (toolCallId === "INVALID_CLIENT") {
+      return INVALID_CLIENT_ERROR;
     }
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
@@ -1972,6 +2006,8 @@ server.registerTool(
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;
+    } else if (toolCallId === "INVALID_CLIENT") {
+      return INVALID_CLIENT_ERROR;
     }
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
@@ -2042,6 +2078,8 @@ server.registerTool(
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;
+    } else if (toolCallId === "INVALID_CLIENT") {
+      return INVALID_CLIENT_ERROR;
     }
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
@@ -2094,6 +2132,8 @@ server.registerTool(
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;
+    } else if (toolCallId === "INVALID_CLIENT") {
+      return INVALID_CLIENT_ERROR;
     }
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
@@ -2176,6 +2216,8 @@ server.registerTool(
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;
+    } else if (toolCallId === "INVALID_CLIENT") {
+      return INVALID_CLIENT_ERROR;
     }
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
@@ -2228,6 +2270,8 @@ server.registerTool(
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;
+    } else if (toolCallId === "INVALID_CLIENT") {
+      return INVALID_CLIENT_ERROR;
     }
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
@@ -2279,6 +2323,8 @@ server.registerTool(
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;
+    } else if (toolCallId === "INVALID_CLIENT") {
+      return INVALID_CLIENT_ERROR;
     }
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
@@ -2330,6 +2376,8 @@ server.registerTool(
 
     if (toolCallId === null) {
       return NO_CLIENT_ERROR;
+    } else if (toolCallId === "INVALID_CLIENT") {
+      return INVALID_CLIENT_ERROR;
     }
 
     const response = (await GetResponseOfIdFromClient(toolCallId)) as
